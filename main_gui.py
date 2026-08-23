@@ -119,8 +119,9 @@ class AnalysisWorker(QThread):
                     f"({result.confidence * 100:.0f} %) | {top3}")
                 ok += 1
             except Exception as exc:
-                self.row_status.emit(i, ST_ERROR, "", str(exc))
-                self.log_line.emit(f"✖ {os.path.basename(path)}: {exc}")
+                err_text = str(exc).strip() or type(exc).__name__
+                self.row_status.emit(i, ST_ERROR, "", err_text)
+                self.log_line.emit(f"✖ {os.path.basename(path)}: {err_text}")
                 err += 1
 
             self.value.emit(i + 1)
@@ -264,11 +265,12 @@ class MainWindow(QMainWindow):
     # --- pridávanie / odoberanie súborov -------------------------------------
     def _add_paths(self, paths: list[str]) -> None:
         added = 0
+        skipped = 0
         for p in paths:
             p = os.path.abspath(p)
-            if not os.path.isfile(p):
-                continue
-            if os.path.splitext(p)[1].lower() not in SUPPORTED_EXTENSIONS:
+            if not os.path.isfile(p) or \
+                    os.path.splitext(p)[1].lower() not in SUPPORTED_EXTENSIONS:
+                skipped += 1
                 continue
             if p in self._path_set:
                 continue
@@ -282,7 +284,10 @@ class MainWindow(QMainWindow):
             self.table.item(row, 0).setToolTip(p)
             added += 1
         if added:
-            self.log(f"Pridaných {added} súborov.")
+            msg = f"Pridaných {added} súborov."
+            if skipped:
+                msg += f" ({skipped} preskočených – neexistujú alebo nepodporovaný formát)"
+            self.log(msg)
             self.lbl_count.setText(f"Súborov: {len(self.file_paths)}")
 
     def _fill_row(self, row: int, status: str, tag: str, detail: str) -> None:
