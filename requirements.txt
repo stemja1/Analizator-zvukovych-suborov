@@ -1,0 +1,25 @@
+# ============================================================
+# Analyzátor zvukových súborov – LAION-CLAP + DirectML
+# Inštalácia:  pip install -r requirements.txt
+# (Windows: torch z PyPI je CPU build – presne toto potrebujeme,
+#  inference beží cez ONNX Runtime DirectML, nie cez CUDA)
+# ============================================================
+
+# GUI
+PyQt6>=6.6.0
+
+# AI model + ONNX export
+transformers>=4.41.0
+torch>=2.2.0
+onnx>=1.15.0
+onnxscript>=0.1.0            # nový torch.export/dynamo exporter (fallback)
+onnxruntime-directml>=1.18.0 ; sys_platform == "win32"
+onnxruntime>=1.18.0           ; sys_platform != "win32"
+
+# Audio
+librosa>=0.10.2
+soundfile>=0.12.1
+numpy>=1.24,<3
+
+# Metadáta
+mutagen>=1.47.0

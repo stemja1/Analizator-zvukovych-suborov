@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Vyexportované ONNX grafy + stiahnutý model (stovky MB – negitovať)
+models/
+*.onnx
+
+# Testovacie zvuky
+test_output/
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
