@@ -20,8 +20,8 @@ import sys
 import time
 import traceback
 
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
@@ -31,6 +31,18 @@ from PyQt6.QtWidgets import (
 
 from core_analyzer import (DEFAULT_SEGMENTS, SUPPORTED_EXTENSIONS, ClapAnalyzer,
                            write_metadata)
+
+# --- prehrávanie súborov (kontrola zvuk ↔ priradený popis) -------------------
+# QtMultimedia je samostatný súčasť PyQt6; ak chýba, appka beží normálne,
+# len neprehráva (všetky funkcie analýzy zostávajú dostupné).
+try:
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+    MULTIMEDIA_OK = True
+except ImportError:  # závisí od lokálnej inštalácie Qt
+    MULTIMEDIA_OK = False
+
+PLAY_HINT = ("Dvojklik na riadok = prehrať súbor · Medzerník = prehrať/pauza · "
+             "Ctrl+←/→ alebo , / . = posun ±5 s · R = od začiatku · Esc = stop")
 
 # --- stavy súborov v tabuľke -----------------------------------------------
 ST_WAITING = "Čaká"
@@ -415,6 +427,10 @@ class AnalysisWorker(QThread):
 
             self.row_status.emit(i, ST_RUNNING, "", "")
             try:
+                # Kým GPU analyzuje súbor i, dekóduje druhé vlákno na pozadí
+                # súbor i+1 (prefetch) – CPU a GPU práca sa prekrývajú.
+                if i + 1 < len(self.files):
+                    analyzer.preload(self.files[i + 1], self.segments)
                 result = analyzer.analyze_file(path, self.descriptions,
                                                segments=self.segments)
                 conf = result.confidence if self.include_score else None
@@ -424,8 +440,9 @@ class AnalysisWorker(QThread):
                                  for d, p in result.ranking[:3])
                 detail = (f"istota {result.confidence * 100:.0f} % | "
                           f"náskok +{result.margin * 100:.0f} % | "
-                          f"{result.segments_used}× okno | {tag_msg} | "
-                          f"{result.elapsed:.1f} s")
+                          f"{result.segments_used}× okno · 1 dekód · "
+                          f"dekód {result.decode_time:.1f} s / GPU "
+                          f"{result.infer_time:.1f} s | {tag_msg}")
                 self.row_status.emit(i, ST_DONE, result.best_description, detail)
                 self.log_line.emit(
                     f"✔ {os.path.basename(path)} → ‘{result.best_description}’ "
@@ -438,6 +455,13 @@ class AnalysisWorker(QThread):
                 err += 1
 
             self.value.emit(i + 1)
+
+        st = self.analyzer._stats if self.analyzer else {}
+        self.log_line.emit(
+            f"📊 Štatistika: {st.get('decodes', 0)} dekódovaní, "
+            f"{st.get('gpu_calls', 0)} GPU/inferenčných volaní.")
+        if self.analyzer is not None:
+            self.analyzer.close()
 
         self.finished_batch.emit(ok, err, self._cancelled)
 
@@ -456,6 +480,20 @@ class MainWindow(QMainWindow):
         self.worker: AnalysisWorker | None = None
         self.analyzer: ClapAnalyzer | None = None  # cache – znovupoužitý naprieč behmi
         self._batch_start_ts: float | None = None
+
+        # prehrávanie na kontrolu „zvuk ↔ priradený popis"
+        self.player = None
+        self._play_row = -1
+        if MULTIMEDIA_OK:
+            self.player = QMediaPlayer(self)
+            self.audio_out = QAudioOutput(self)
+            self.audio_out.setVolume(0.9)
+            self.player.setAudioOutput(self.audio_out)
+            self.player.positionChanged.connect(self._on_play_position)
+            self.player.durationChanged.connect(self._on_play_duration)
+            self.player.mediaStatusChanged.connect(self._on_play_status)
+            self.player.errorOccurred.connect(self._on_play_error)
+            self.player.playbackStateChanged.connect(self._on_play_state)
 
         self._build_ui()
         self._connect_actions()
@@ -520,6 +558,14 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setAcceptDrops(True)
         left.addWidget(self.table, stretch=1)
+
+        self.lbl_play = QLabel(PLAY_HINT)
+        self.lbl_play.setStyleSheet("color: #666; font-size: 11px;")
+        self.lbl_play.setToolTip(
+            "Ovládanie prehrávania (keď je kurzor v tabuľke súborov):\n"
+            "Medzerník = prehrať/pauza · Ctrl+←/→ alebo , / . = posun ±5 s\n"
+            "R = od začiatku · Esc = stop")
+        left.addWidget(self.lbl_play)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
@@ -744,13 +790,18 @@ class MainWindow(QMainWindow):
     def remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedIndexes()},
                       reverse=True)
+        if self._play_row in rows:
+            self.stop_playback()
         for r in rows:
             self.table.removeRow(r)
             path = self.file_paths.pop(r)
             self._path_set.discard(path)
+            if self._play_row > r:  # riadky pod odstráneným sa posunú hore
+                self._play_row -= 1
         self.lbl_count.setText(f"Súborov: {len(self.file_paths)}")
 
     def clear_all(self) -> None:
+        self.stop_playback()
         self.table.setRowCount(0)
         self.file_paths.clear()
         self._path_set.clear()
@@ -884,6 +935,96 @@ class MainWindow(QMainWindow):
         self.log(msg)
         QMessageBox.information(self, "Analýza dokončená", msg + ".")
 
+    # --- prehrávanie (kontrola zvuk ↔ priradený popis) ------------------------
+    @staticmethod
+    def _fmt_mmss(ms: int) -> str:
+        s = max(0, int(ms // 1000))
+        m, s = divmod(s, 60)
+        return f"{m:02d}:{s:02d}"
+
+    def play_row(self, row: int) -> None:
+        """Prehrá súbor na danom riadku tabuľky (od začiatku)."""
+        if not (0 <= row < len(self.file_paths)):
+            return
+        path = self.file_paths[row]
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "Súbor neexistuje",
+                                f"Súbor už nie je na disku:\n{path}")
+            return
+        if self.player is None:
+            QMessageBox.information(
+                self, "Prehrávanie nedostupné",
+                "Chýba multimediálna časť PyQt6 – prehrávanie je vypnuté.\n"
+                "Pomôže preinštalovať aplikáciu (SPUSTI.bat).")
+            return
+        self.stop_playback()
+        self._play_row = row
+        self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.play()
+
+    def toggle_playback(self) -> None:
+        """Medzerník – prehrať/pauza. Keď nič nehrá, prehrá vybratý riadok."""
+        if self.player is None:
+            return
+        playing = (self.player.playbackState()
+                   == QMediaPlayer.PlaybackState.PlayingState)
+        if playing:
+            self.player.pause()
+        elif self._play_row >= 0:
+            self.player.play()
+        else:
+            self.play_row(self.table.currentRow())
+
+    def stop_playback(self) -> None:
+        """Zastaví prehrávanie a vynuluje štítok pod tabuľkou."""
+        self._play_row = -1
+        if self.player is not None:
+            self.player.stop()
+            self.player.setSource(QUrl())
+        self.lbl_play.setText(PLAY_HINT)
+
+    def seek_relative(self, delta_ms: int) -> None:
+        """Posun v prehrávaní o ±milisekúnd (Ctrl+←/→ alebo , / .)."""
+        if self.player is None or self._play_row < 0:
+            return
+        limit = max(1, self.player.duration())
+        pos = max(0, min(self.player.position() + delta_ms, limit))
+        self.player.setPosition(pos)
+
+    def replay(self) -> None:
+        """R – prehrá aktuálny súbor od začiatku."""
+        if self._play_row >= 0:
+            self.play_row(self._play_row)
+
+    def on_table_double_clicked(self, item) -> None:
+        self.play_row(item.row())
+
+    def _on_play_position(self, ms: int) -> None:
+        if self._play_row < 0 or self.player is None:
+            return
+        name = os.path.basename(self.file_paths[self._play_row])
+        total = self._fmt_mmss(self.player.duration())
+        paused = (self.player.playbackState()
+                  != QMediaPlayer.PlaybackState.PlayingState)
+        state = "⏸" if paused else "▶"
+        self.lbl_play.setText(f"{state} [{self._fmt_mmss(ms)} / {total}]  {name}")
+
+    def _on_play_duration(self, _ms: int) -> None:
+        self._on_play_position(self.player.position() if self.player else 0)
+
+    def _on_play_status(self, status) -> None:
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.stop_playback()
+
+    def _on_play_state(self, _state) -> None:
+        # obnova štítku pri pauze/pokračovaní (pozícia sa pritom nemení)
+        if self.player is not None:
+            self._on_play_position(self.player.position())
+
+    def _on_play_error(self, _err, msg: str) -> None:
+        self.log(f"⚠ Prehrávanie: {msg}")
+        self.stop_playback()
+
     # --- drag & drop -----------------------------------------------------------
     def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt konvencia)
         if event.mimeData().hasUrls():
@@ -911,6 +1052,7 @@ class MainWindow(QMainWindow):
 
     # --- zatvorenie okna --------------------------------------------------------
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt konvencia)
+        self.stop_playback()
         if self.worker and self.worker.isRunning():
             answer = QMessageBox.question(
                 self, "Analýza beží",
@@ -942,6 +1084,24 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_analysis)
         self.btn_cancel.clicked.connect(self.cancel_analysis)
         self.cmb_presets.currentIndexChanged.connect(self.on_preset_changed)
+        self.table.itemDoubleClicked.connect(self.on_table_double_clicked)
+
+        # Klávesové skratky prehrávania – aktívne LEN, keď je kurzor
+        # v tabuľke súborov (aby medzerník nerušil písanie popisov).
+        if MULTIMEDIA_OK:
+            shortcuts = (
+                (QKeySequence(Qt.Key.Key_Space), self.toggle_playback),
+                (QKeySequence("Ctrl+Left"), lambda: self.seek_relative(-5000)),
+                (QKeySequence("Ctrl+Right"), lambda: self.seek_relative(5000)),
+                (QKeySequence(","), lambda: self.seek_relative(-5000)),
+                (QKeySequence("."), lambda: self.seek_relative(5000)),
+                (QKeySequence("R"), self.replay),
+                (QKeySequence(Qt.Key.Key_Escape), self.stop_playback),
+            )
+            for seq, fn in shortcuts:
+                sc = QShortcut(seq, self.table)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                sc.activated.connect(fn)
 
 
 # ---------------------------------------------------------------------------

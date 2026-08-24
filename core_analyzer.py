@@ -52,6 +52,7 @@ MODEL_REVISION = "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a"
 TARGET_SR = 48_000      # Hz – CLAP pracuje s 48 kHz audiom
 CLIP_SECONDS = 10       # CLAP bol trénovaný na 10-sekundových klipoch
 DEFAULT_SEGMENTS = 4    # počet 10 s okien na súbor (viac = presnejšie, pomalšie)
+MAX_FULL_DECODE_SECONDS = 1200   # nad 20 min sa celý súbor nenačítava (RAM)
 
 SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac"}
 
@@ -250,8 +251,10 @@ class AnalysisResult:
     ranking: list[tuple[str, float]]      # zostupne zoradené (popis, p)
     margin: float                         # náskok pred 2. kandidátom (0..1)
     segments_used: int                    # počet analyzovaných 10 s okien
-    backend: str
-    elapsed: float
+    decode_time: float = 0.0              # načítanie/dekódovanie súboru (s)
+    infer_time: float = 0.0               # GPU/CPU inference (s)
+    backend: str = ""
+    elapsed: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +282,9 @@ class ClapAnalyzer:
         self.backend_info: str = "neinicializované"
         self._meta: dict = {}
         self._text_cache: dict[tuple, np.ndarray] = {}
+        self._prefetches: dict[str, object] = {}  # path -> future (max 2 položky)
+        self._pool = None                    # ThreadPoolExecutor (lazy)
+        self._stats = {"decodes": 0, "gpu_calls": 0}  # telemetria výkonu
 
     # -- verejné API --------------------------------------------------------
     def load(self) -> None:
@@ -353,31 +359,16 @@ class ClapAnalyzer:
             raise ValueError("Chýba zoznam kandidátskych popisov.")
 
         t0 = time.time()
-        import librosa
-        total = float(librosa.get_duration(path=file_path))
-        segments = max(1, int(segments))
 
-        if total <= CLIP_SECONDS + 0.5:
-            centers = [total / 2.0]
-        else:
-            centers = [(i + 0.5) / segments * total for i in range(segments)]
+        # okná: z prefetchu (ak GUI predložilo) alebo vypočítaj teraz;
+        # súbor sa dekóduje JEDNÝM volaním a okná sa vykroja z pamäte
+        windows, n_windows, decode_time = self._take_windows(file_path, segments)
 
-        # deduplikácia prebytočných (prekrývajúcich sa) okien
-        starts, seen = [], set()
-        for c in centers:
-            if total > CLIP_SECONDS:
-                s = round(max(0.0, min(c - CLIP_SECONDS / 2.0,
-                                       total - CLIP_SECONDS)), 1)
-            else:
-                s = 0.0
-            if s not in seen:
-                seen.add(s)
-                starts.append(s)
+        t_inf = time.time()
+        embs = self.embed_audio_batch(windows)          # 1 GPU volanie (batch)
+        audio_emb = _l2norm(np.mean(embs, axis=0, keepdims=True))[0]
+        infer_time = time.time() - t_inf
 
-        embs = [self.embed_audio(
-                    load_audio_window(file_path, s + CLIP_SECONDS / 2.0))
-                for s in starts]
-        audio_emb = _l2norm(np.mean(np.stack(embs), axis=0, keepdims=True))[0]
         text_emb = self.embed_texts(candidate_descriptions)  # (N, D)
 
         logits = (text_emb @ audio_emb) * float(self._meta.get("logit_scale", 100.0))
@@ -392,22 +383,131 @@ class ClapAnalyzer:
             confidence=float(probs[best]),
             ranking=[(candidate_descriptions[i], float(probs[i])) for i in order],
             margin=float(probs[best]) - second,
-            segments_used=len(starts),
+            segments_used=n_windows,
+            decode_time=decode_time,
+            infer_time=infer_time,
             backend=self.backend_info,
             elapsed=time.time() - t0,
         )
 
+    # -- príprava okien (1 dekód na súbor) + prefetch -------------------------
+    def _prepare_windows(self, file_path: str,
+                         segments: int) -> tuple[list[np.ndarray], int, float]:
+        """Vráti (zoznam 10 s okien, počet, čas dekódovania).
+
+        Súbor sa dekóduje JEDNÝM volaním librosa.load a okná sa vykroja
+        z pamäte (predtým N dekódovaní — MP3 s offsetom sa dekódovalo
+        vždy od začiatku súboru). Extrémne dlhé súbor (> 20 min) sa z
+        dôvodu RAM načítavajú postupne po oknách.
+        """
+        t0 = time.time()
+        import librosa
+
+        total = float(librosa.get_duration(path=file_path))
+        segments = max(1, int(segments))
+        clip_n = CLIP_SECONDS * TARGET_SR
+
+        if total <= CLIP_SECONDS + 0.5:
+            starts = [0.0]
+        else:
+            centers = [(i + 0.5) / segments * total for i in range(segments)]
+            starts, seen = [], set()
+            for c in centers:
+                s = round(max(0.0, min(c - CLIP_SECONDS / 2.0,
+                                       total - CLIP_SECONDS)), 1)
+                if s not in seen:
+                    seen.add(s)
+                    starts.append(s)
+
+        windows: list[np.ndarray] = []
+        if total <= MAX_FULL_DECODE_SECONDS:
+            y, _ = librosa.load(file_path, sr=TARGET_SR, mono=True)
+            self._stats["decodes"] += 1
+            y = np.asarray(y, dtype=np.float32)
+            for s in starts:
+                i0 = int(round(s * TARGET_SR))
+                w = y[i0:i0 + clip_n]
+                if w.shape[0] < clip_n:
+                    w = np.pad(w, (0, clip_n - w.shape[0]))
+                windows.append(np.ascontiguousarray(w))
+        else:
+            for s in starts:
+                windows.append(load_audio_window(
+                    file_path, s + CLIP_SECONDS / 2.0))
+                self._stats["decodes"] += 1
+
+        return windows, len(starts), time.time() - t0
+
+    def _take_windows(self, file_path: str,
+                      segments: int) -> tuple[list[np.ndarray], int, float]:
+        """Použije preddekódované okná z prefetchu, ak sedia; inak počíta.
+
+        Prefetch pre INÝ súbor sa zahodí len pri spotrebovaní vlastného
+        súboru – cudzí future zostáva v zásobníku (použije sa neskôr),
+        takže sa nič zbytočne nedekóduje dvakrát.
+        """
+        fut = self._prefetches.pop(file_path, None)
+        if fut is not None:
+            return fut.result()
+        return self._prepare_windows(file_path, segments)
+
+    def preload(self, file_path: str, segments: int = DEFAULT_SEGMENTS) -> None:
+        """Preddekóduje súbor vo vlákne na pozadí.
+
+        Využitie: kým GPU analyzuje súbor N, CPU medzitým dekóduje súbor
+        N+1 (prekrytie CPU a GPU práce → vyššie využitie GPU). Uchová sa
+        max. 2 súbory vopred (aktuálny + ďalší), aby nevyrástla pamäť.
+        """
+        import concurrent.futures
+        if self._pool is None:
+            self._pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="clap-preload")
+        if file_path in self._prefetches:
+            return
+        while len(self._prefetches) >= 2:
+            old_path, old_fut = next(iter(self._prefetches.items()))
+            old_fut.cancel()
+            del self._prefetches[old_path]
+        self._prefetches[file_path] = self._pool.submit(
+            self._prepare_windows, file_path, segments)
+
+    def close(self) -> None:
+        """Uvoľní prefetch vlákno."""
+        if self._pool is not None:
+            self._pool.shutdown(wait=False)
+            self._pool = None
+        self._prefetches = {}
+
     # -- embedovanie ----------------------------------------------------------
     def embed_audio(self, waveform: np.ndarray) -> np.ndarray:
         """Waveform (48 kHz, mono, 10 s) -> normalizovaný CLAP embedding."""
+        return self.embed_audio_batch([waveform])[0]
+
+    def embed_audio_batch(self, waveforms: list[np.ndarray]) -> np.ndarray:
+        """Všetky okná v JEDNOM GPU volaní -> (N, D) normalizované embeddingy.
+
+        Audio graf má dynamický batch (export od v0.4.0); pri staršom grafe
+        s fixným batch=1 prebehne fallback po riadkoch (výsledky rovnaké).
+        """
         feats = self.feature_extractor(
-            np.asarray(waveform, dtype=np.float32),
+            [np.asarray(w, dtype=np.float32) for w in waveforms],
             sampling_rate=TARGET_SR, return_tensors="np",
         )
-        x = np.ascontiguousarray(feats["input_features"], dtype=np.float32)
-        x = self._fit_audio_shape(x)
-        out = self.audio_session.run(None, {"input_features": x})[0]
-        return _l2norm(out.reshape(1, -1))[0]
+        x = self._fit_audio_shape(
+            np.ascontiguousarray(feats["input_features"], dtype=np.float32))
+        try:
+            out = self.audio_session.run(None, {"input_features": x})[0]
+            self._stats["gpu_calls"] += 1
+            return _l2norm(np.asarray(out, dtype=np.float32)
+                           .reshape(len(waveforms), -1))
+        except Exception:
+            rows = []
+            for i in range(x.shape[0]):
+                out = self.audio_session.run(
+                    None, {"input_features": x[i:i + 1]})[0]
+                self._stats["gpu_calls"] += 1
+                rows.append(np.asarray(out, dtype=np.float32).reshape(1, -1))
+            return _l2norm(np.concatenate(rows, axis=0))
 
     def embed_texts(self, descriptions: list[str]) -> np.ndarray:
         """Zoznam popisov -> (N, D) normalizované embeddingy (s cache)."""
@@ -473,12 +573,19 @@ class ClapAnalyzer:
         if not wanted:
             wanted = available[:1] or ["CPUExecutionProvider"]
 
+        providers_arg: list = []
+        for p in wanted:
+            if p == "DmlExecutionProvider":
+                providers_arg.append((p, {"device_id": 0}))
+            else:
+                providers_arg.append(p)
+
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         try:
             sess = ort.InferenceSession(onnx_path, sess_options=opts,
-                                        providers=wanted)
+                                        providers=providers_arg)
         except Exception as exc:
             if "DmlExecutionProvider" in wanted:
                 self._log(f"⚠ DirectML zlyhalo ({type(exc).__name__}: {exc}) → "
@@ -577,23 +684,25 @@ class ClapAnalyzer:
                               do_constant_folding=False, **kwargs)
 
     def _fit_audio_shape(self, x: np.ndarray) -> np.ndarray:
-        """Doladí počet snímkov na hodnotu z exportu (fixný tvar vstupu)."""
+        """Upraví tvary na hodnoty z exportu (os 0 = voľný batch)."""
         expected = self._meta.get("audio_input_shape")
-        if expected and list(x.shape) == list(expected):
-            return x
-        axis = int(self._meta.get("frames_axis", 1))
-        want = int(self._meta.get("frames", x.shape[axis]))
-        got = int(x.shape[axis])
-        if got > want:
-            sl = [slice(None)] * x.ndim
-            sl[axis] = slice(0, want)
-            x = x[tuple(sl)]
-        elif got < want:
-            pad = [(0, 0)] * x.ndim
-            pad[axis] = (0, want - got)
-            x = np.pad(x, pad)
-        if x.ndim > len(expected or []):       # prípadný extra batch rozmer
-            x = x.reshape(expected)
+        if not expected:
+            return np.ascontiguousarray(x, dtype=np.float32)
+
+        axis = int(self._meta.get("frames_axis", len(expected) - 2))
+        want = int(self._meta.get("frames", expected[axis]))
+        got = int(x.shape[axis]) if axis < x.ndim else -1
+        if got != want:
+            if got > want:
+                sl = [slice(None)] * x.ndim
+                sl[axis] = slice(0, want)
+                x = x[tuple(sl)]
+            else:
+                pad = [(0, 0)] * x.ndim
+                pad[axis] = (0, want - got)
+                x = np.pad(x, pad)
+        if x.ndim != len(expected):     # normalizuj na (batch, *expected[1:])
+            x = x.reshape((x.shape[0], *expected[1:]))
         return np.ascontiguousarray(x, dtype=np.float32)
 
 
@@ -697,12 +806,16 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
         frames_axis = int(np.argmax(input_features.shape[-2:])) + \
             len(input_features.shape) - 2
 
+        audio_dyn_axes = {"input_features": {0: "batch"},
+                          "audio_embeds": {0: "batch"}}
+
         print(f"Exportujem clap_audio.onnx (vstup {tuple(input_features.shape)})…")
         with torch.no_grad():
             _do_export(
                 _AudioFn(model), (input_features,),
                 os.path.join(onnx_dir, AUDIO_ONNX_NAME),
-                input_names=["input_features"], output_names=["audio_embeds"])
+                input_names=["input_features"], output_names=["audio_embeds"],
+                dynamic_axes=audio_dyn_axes)
 
         logit_scale = 100.0
         try:
