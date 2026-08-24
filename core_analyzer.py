@@ -45,6 +45,9 @@ from mutagen.oggvorbis import OggVorbis
 # Konštanty
 # ---------------------------------------------------------------------------
 MODEL_ID = "laion/clap-htsat-unfused"
+# Pripnutá revízia (git commit na HF Hube) – bráni tichej zámene váh modelu
+# pod tým istým názvom. Overené cez https://huggingface.co/api/models/laion/clap-htsat-unfused
+MODEL_REVISION = "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a"
 
 TARGET_SR = 48_000      # Hz – CLAP pracuje s 48 kHz audiom
 CLIP_SECONDS = 10       # CLAP bol trénovaný na 10-sekundových klipoch
@@ -128,7 +131,9 @@ def write_metadata(file_path: str, description: str,
             tags = ID3()
         tags.delall("COMM")
         tags.add(COMM(encoding=3, lang="eng", desc="Description", text=text))
-        tags.save(file_path, v1=2)
+        # v1=0: legacy ID3v1 tag nepodporuje UTF-8 (len Latin-1) a mangloval
+        # by diakritiku – primárny je ID3v2 COMM vyššie, ktorý UTF-8 zapisuje správne.
+        tags.save(file_path, v1=0)
         return "ID3 COMM"
 
     if ext == ".flac":
@@ -244,9 +249,11 @@ class ClapAnalyzer:
 
     def __init__(self, model_id: str = MODEL_ID,
                  onnx_dir: str = DEFAULT_ONNX_DIR,
+                 revision: str | None = MODEL_REVISION,
                  log: LogFn | None = None):
         self.model_id = model_id
         self.onnx_dir = onnx_dir
+        self.revision = revision
         self._log: LogFn = log or _log_to_console
 
         self.processor = None          # transformers ClapProcessor
@@ -267,7 +274,8 @@ class ClapAnalyzer:
         self._log(f"Načítavam procesor a tokenizér ‘{self.model_id}’…")
         from transformers import AutoProcessor  # lazy import (ťažký)
 
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_id, revision=self.revision)
         self.feature_extractor = self.processor.feature_extractor
         self.tokenizer = self.processor.tokenizer
 
@@ -313,7 +321,8 @@ class ClapAnalyzer:
 
         self._log("Načítavam text encoder (torch, CPU)…")
         self._text_torch_model = \
-            ClapTextModelWithProjection.from_pretrained(self.model_id).eval()
+            ClapTextModelWithProjection.from_pretrained(
+                self.model_id, revision=self.revision).eval()
 
     def analyze_file(self, file_path: str,
                      candidate_descriptions: list[str]) -> AnalysisResult:
@@ -544,7 +553,7 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
         print("(používam dynamo/torch.export exporter)")
 
     print("Načítavam procesor…")
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    processor = AutoProcessor.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
     os.makedirs(onnx_dir, exist_ok=True)
 
     def _do_export(module, args, path, **kw):
@@ -594,9 +603,10 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
     def _load_full():
         from transformers import ClapModel
         try:
-            m = ClapModel.from_pretrained(MODEL_ID, attn_implementation="eager")
+            m = ClapModel.from_pretrained(
+                MODEL_ID, revision=MODEL_REVISION, attn_implementation="eager")
         except TypeError:  # staršie transformers bez attn_implementation
-            m = ClapModel.from_pretrained(MODEL_ID)
+            m = ClapModel.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
         return m.eval()
 
     def _free(model, unneeded_attrs):
@@ -673,7 +683,7 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
         try:
             from transformers import ClapTextModelWithProjection
             light_model = ClapTextModelWithProjection.from_pretrained(
-                MODEL_ID).eval()
+                MODEL_ID, revision=MODEL_REVISION).eval()
         except Exception as exc:
             print(f"⚠ ľahký text model nedostupný ({exc}) – "
                   f"použijem plný ClapModel")

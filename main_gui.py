@@ -70,11 +70,13 @@ class AnalysisWorker(QThread):
     finished_batch = pyqtSignal(int, int, bool)   # ok, chyby, zrušené
 
     def __init__(self, files: list[str], descriptions: list[str],
-                 include_score: bool = False, parent=None):
+                 include_score: bool = False,
+                 analyzer: ClapAnalyzer | None = None, parent=None):
         super().__init__(parent)
         self.files = list(files)
         self.descriptions = list(descriptions)
         self.include_score = include_score
+        self.analyzer = analyzer  # znovupoužitý z predchádzajúceho behu, ak je hotový
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -84,18 +86,28 @@ class AnalysisWorker(QThread):
     def run(self) -> None:  # noqa: D102 – beží v samostatnom vlákne
         ok = err = 0
 
-        self.phase.emit("model")
-        analyzer = ClapAnalyzer(log=self.log_line.emit)
-        try:
-            analyzer.load()
-        except Exception as exc:  # model sa nepodarilo pripraviť
-            self.log_line.emit(f"✖ Chyba pri príprave modelu: {exc}")
-            self.log_line.emit(traceback.format_exc())
-            for i in range(len(self.files)):
-                self.row_status.emit(i, ST_ERROR, "", "Model sa nepodarilo pripraviť")
-            self.finished_batch.emit(0, len(self.files), False)
-            return
+        # Model sa načíta len raz – ak už máme hotový analyzer z predošlého
+        # behu (audio_session != None), znovu ho nenačítavame, len prepojíme
+        # log na aktuálny worker.
+        if self.analyzer is None or self.analyzer.audio_session is None:
+            self.phase.emit("model")
+            if self.analyzer is None:
+                self.analyzer = ClapAnalyzer(log=self.log_line.emit)
+            else:
+                self.analyzer._log = self.log_line.emit
+            try:
+                self.analyzer.load()
+            except Exception as exc:  # model sa nepodarilo pripraviť
+                self.log_line.emit(f"✖ Chyba pri príprave modelu: {exc}")
+                self.log_line.emit(traceback.format_exc())
+                for i in range(len(self.files)):
+                    self.row_status.emit(i, ST_ERROR, "", "Model sa nepodarilo pripraviť")
+                self.finished_batch.emit(0, len(self.files), False)
+                return
+        else:
+            self.analyzer._log = self.log_line.emit
 
+        analyzer = self.analyzer
         self.backend_ready.emit(analyzer.backend_info)
         self.phase.emit("batch")
 
@@ -141,6 +153,7 @@ class MainWindow(QMainWindow):
         self.file_paths: list[str] = []
         self._path_set: set[str] = set()
         self.worker: AnalysisWorker | None = None
+        self.analyzer: ClapAnalyzer | None = None  # cache – znovupoužitý naprieč behmi
 
         self._build_ui()
         self._connect_actions()
@@ -362,7 +375,8 @@ class MainWindow(QMainWindow):
                  f"s {len(descs)} popismi…")
 
         self.worker = AnalysisWorker(self.file_paths, descs,
-                                     self.chk_score.isChecked())
+                                     self.chk_score.isChecked(),
+                                     analyzer=self.analyzer)
         self.worker.row_status.connect(self.on_row_status)
         self.worker.value.connect(self.progress.setValue)
         self.worker.log_line.connect(self.log)
@@ -404,6 +418,7 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 1)
         self.progress.setFormat("")
         if self.worker:
+            self.analyzer = self.worker.analyzer  # cache pre ďalší beh
             self.worker.deleteLater()
             self.worker = None
 
@@ -446,8 +461,17 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+
             self.worker.cancel()
-            self.worker.wait(5000)
+            self.log("⏳ Čakám na dokončenie aktuálneho súboru pred ukončením…")
+            self._set_busy(True)
+            # Aktívne čakáme, kým vlákno skutočne dobehne – vlákno sa
+            # nesmie zničiť, kým beží (spôsobilo by pád aplikácie).
+            # GUI zostáva odozvané vďaka processEvents().
+            while self.worker is not None and self.worker.isRunning():
+                self.worker.wait(200)
+                QApplication.processEvents()
+
         event.accept()
 
     # --- signály --------------------------------------------------------------
