@@ -5,6 +5,29 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.5.1] – 2026-08-24 – Oprava: AKTUALIZUJ.bat bez gitu
+
+Hlásenie používateľa: „'git' is not recognized as an internal or external
+command". Príčina: `AKTUALIZUJ.bat` spoliehal na `git` — ale používateľ
+nemá git nainštalovaný (appka bola stiahnutá ako ZIP z webu, priečinok
+nie je git repozitár).
+
+### Opravené
+- **`AKTUALIZUJ.bat` má nový bezgitový rezim:** ak git chýba (alebo
+  priečinok nie je git repozitár), stiahne sa ZIP najnovšej verzie
+  z GitHubu a rozbalí cez PowerShell (súčasť každého Windows — nič
+  sa nemusí inštalovať). Súbory sa prepíšu, okrem:
+  `.venv` (nainštalované prostredie), `models` (stiahnutý AI model),
+  `__pycache__`. Ak je git k dispozícii, použije sa rýchly `git pull`.
+- **Bezpečné samoupdatovanie bat súboru:** bežiaci `.bat` sa nemôže
+  korektne prepísať sám za sebou — nová verzia sa odloží ako
+  `AKTUALIZUJ.bat.new` a nainštaluje pri najbližšom spustení.
+- **Kontrola knižníc po update:** `AKTUALIZUJ.bat` teraz po stiahnutí
+  spustí `pip install -r requirements.txt` — keby nová verzia appky
+  potrebovala novú knižnicu, dorobí sa sama (inak rýchla no-op kontrola).
+
+---
+
 ## [0.5.0] – 2026-08-24 – Prehrávanie súborov + oprava prefetchu
 
 Požiadavka používateľa: pri kontrole výsledkov chýhal spôsob, ako súbor
