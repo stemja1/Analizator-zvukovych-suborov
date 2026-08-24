@@ -51,10 +51,13 @@ MODEL_REVISION = "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a"
 
 TARGET_SR = 48_000      # Hz – CLAP pracuje s 48 kHz audiom
 CLIP_SECONDS = 10       # CLAP bol trénovaný na 10-sekundových klipoch
+DEFAULT_SEGMENTS = 4    # počet 10 s okien na súbor (viac = presnejšie, pomalšie)
 
 SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac"}
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+TEXT_BATCH = 32          # veľkosť dávky pri embedovaní textov (ohraničenie RAM)
+
 DEFAULT_ONNX_DIR = os.path.join(_HERE, "models", "clap_htsat_unfused_onnx")
 AUDIO_ONNX_NAME = "clap_audio.onnx"
 TEXT_ONNX_NAME = "clap_text.onnx"
@@ -81,13 +84,13 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / np.sum(e)
 
 
-def load_audio_center(file_path: str, clip_seconds: int = CLIP_SECONDS,
+def load_audio_window(file_path: str, center_time: float,
+                      clip_seconds: int = CLIP_SECONDS,
                       sr: int = TARGET_SR) -> np.ndarray:
-    """Načíta zvuk ako mono float32 @48 kHz.
+    """Načíta 10-sekundové okno so stredom na `center_time` (mono @48 kHz).
 
-    Ak je súbor dlhší ako `clip_seconds`, vezme sa stredný klip
-    (na ňom CLAP dáva najstabilnejšie výsledky). Kratší klip sa doplní
-    nulami na presnú dĺžku – vďaka tomu má ONNX vždy fixný tvar vstupu.
+    Okno sa oreže na rozsah súboru; kratší súbor sa doplní nulami na presnú
+    dĺžku – vďaka tomu má ONNX vždy fixný tvar vstupu.
     """
     import librosa  # lazy import – prvý súbor chvíľu trvá, ale GUI štartuje rýchlo
 
@@ -95,9 +98,9 @@ def load_audio_center(file_path: str, clip_seconds: int = CLIP_SECONDS,
     need = float(clip_seconds)
 
     if total > need:
-        offset = (total - need) / 2.0
+        start = max(0.0, min(center_time - need / 2.0, total - need))
         y, _ = librosa.load(file_path, sr=sr, mono=True,
-                            offset=offset, duration=need)
+                            offset=start, duration=need)
     else:
         y, _ = librosa.load(file_path, sr=sr, mono=True)
 
@@ -107,6 +110,14 @@ def load_audio_center(file_path: str, clip_seconds: int = CLIP_SECONDS,
     elif y.shape[0] > target:                    # (od-zaokrúhlenia) orez
         y = y[:target]
     return y.astype(np.float32, copy=False)
+
+
+def load_audio_center(file_path: str, clip_seconds: int = CLIP_SECONDS,
+                      sr: int = TARGET_SR) -> np.ndarray:
+    """Stredný klip – zachované pre spätnú kompatibilitu (CLI a pod.)."""
+    import librosa
+    total = float(librosa.get_duration(path=file_path))
+    return load_audio_window(file_path, total / 2.0, clip_seconds, sr)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +248,8 @@ class AnalysisResult:
     best_description: str
     confidence: float                     # 0..1
     ranking: list[tuple[str, float]]      # zostupne zoradené (popis, p)
+    margin: float                         # náskok pred 2. kandidátom (0..1)
+    segments_used: int                    # počet analyzovaných 10 s okien
     backend: str
     elapsed: float
 
@@ -325,28 +338,61 @@ class ClapAnalyzer:
                 self.model_id, revision=self.revision).eval()
 
     def analyze_file(self, file_path: str,
-                     candidate_descriptions: list[str]) -> AnalysisResult:
-        """Vráti najlepší popis pre daný zvukový súbor + celé poradie."""
+                     candidate_descriptions: list[str],
+                     segments: int = DEFAULT_SEGMENTS) -> AnalysisResult:
+        """Vráti najlepší popis pre daný zvukový súbor + celé poradie.
+
+        Presnosť: súbor sa analyzuje v `segments` rovnomerne rozmiestených
+        10-sekundových oknách (embeddingy sa spriemerujú). Súbor dlhší ako
+        10 s tak zachytí celý svoj obsah, nielen stred. Pri krátkom súbore
+        stačí jediné okno (doplnené nulami).
+        """
         if self.audio_session is None:
             raise RuntimeError("Model nie je načítaný – zavolajte najprv load().")
         if not candidate_descriptions:
             raise ValueError("Chýba zoznam kandidátskych popisov.")
 
         t0 = time.time()
-        waveform = load_audio_center(file_path)
-        audio_emb = self.embed_audio(waveform)             # (D,)
+        import librosa
+        total = float(librosa.get_duration(path=file_path))
+        segments = max(1, int(segments))
+
+        if total <= CLIP_SECONDS + 0.5:
+            centers = [total / 2.0]
+        else:
+            centers = [(i + 0.5) / segments * total for i in range(segments)]
+
+        # deduplikácia prebytočných (prekrývajúcich sa) okien
+        starts, seen = [], set()
+        for c in centers:
+            if total > CLIP_SECONDS:
+                s = round(max(0.0, min(c - CLIP_SECONDS / 2.0,
+                                       total - CLIP_SECONDS)), 1)
+            else:
+                s = 0.0
+            if s not in seen:
+                seen.add(s)
+                starts.append(s)
+
+        embs = [self.embed_audio(
+                    load_audio_window(file_path, s + CLIP_SECONDS / 2.0))
+                for s in starts]
+        audio_emb = _l2norm(np.mean(np.stack(embs), axis=0, keepdims=True))[0]
         text_emb = self.embed_texts(candidate_descriptions)  # (N, D)
 
         logits = (text_emb @ audio_emb) * float(self._meta.get("logit_scale", 100.0))
         probs = _softmax(logits.astype(np.float64))
         order = np.argsort(-probs)
         best = int(order[0])
+        second = float(probs[int(order[1])]) if len(order) > 1 else 0.0
 
         return AnalysisResult(
             file_path=file_path,
             best_description=candidate_descriptions[best],
             confidence=float(probs[best]),
             ranking=[(candidate_descriptions[i], float(probs[i])) for i in order],
+            margin=float(probs[best]) - second,
+            segments_used=len(starts),
             backend=self.backend_info,
             elapsed=time.time() - t0,
         )
@@ -379,15 +425,29 @@ class ClapAnalyzer:
         attention_mask = np.asarray(enc["attention_mask"], dtype=np.int64)
 
         if self.text_session is not None:            # ONNX cesta
-            # graf má fixný batch=1 → embedujeme po riadkoch (rýchle, cachované)
-            rows = []
-            for i in range(input_ids.shape[0]):
-                out = self.text_session.run(None, {
-                    "input_ids": input_ids[i:i + 1],
-                    "attention_mask": attention_mask[i:i + 1],
-                })[0]
-                rows.append(np.asarray(out, dtype=np.float32).reshape(1, -1))
-            emb = np.concatenate(rows, axis=0)
+            n = input_ids.shape[0]
+            try:
+                # graf s dynamickým batchom → dávky po 32 (ohraničená RAM)
+                rows = []
+                for i in range(0, n, TEXT_BATCH):
+                    out = self.text_session.run(None, {
+                        "input_ids": input_ids[i:i + TEXT_BATCH],
+                        "attention_mask": attention_mask[i:i + TEXT_BATCH],
+                    })[0]
+                    rows.append(np.asarray(out, dtype=np.float32))
+                emb = np.concatenate(rows, axis=0) if rows else \
+                    np.zeros((n, int(self._meta.get("embedding_dim", 512))),
+                             dtype=np.float32)
+            except Exception:
+                # starší graf s fixným batch=1 → po riadkoch (výsledky rovnaké)
+                rows = []
+                for i in range(n):
+                    out = self.text_session.run(None, {
+                        "input_ids": input_ids[i:i + 1],
+                        "attention_mask": attention_mask[i:i + 1],
+                    })[0]
+                    rows.append(np.asarray(out, dtype=np.float32).reshape(1, -1))
+                emb = np.concatenate(rows, axis=0)
         else:                                        # torch fallback (CPU)
             import torch
             with torch.no_grad():
@@ -556,11 +616,16 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
     processor = AutoProcessor.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
     os.makedirs(onnx_dir, exist_ok=True)
 
-    def _do_export(module, args, path, **kw):
+    def _do_export(module, args, path, dynamic_axes=None, dynamic_shapes=None, **kw):
         if dynamo:
-            torch.onnx.export(module, args, path, **kw)   # nový exporter
+            # nový exporter: dynamické tvary cez dynamic_shapes
+            kw.pop("do_constant_folding", None) if "do_constant_folding" in kw else None
+            torch.onnx.export(module, args, path,
+                              dynamic_shapes=dynamic_shapes, **kw)
         else:
-            ClapAnalyzer._torch_export(module, args, path, **kw)
+            # TorchScript exporter: dynamické tvary cez dynamic_axes
+            ClapAnalyzer._torch_export(module, args, path,
+                                       dynamic_axes=dynamic_axes, **kw)
 
     def _pooler_or_tensor(out):
         """transformers v5 vracia ModelOutput, v4 priamo tensor."""
@@ -688,6 +753,19 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
             print(f"⚠ ľahký text model nedostupný ({exc}) – "
                   f"použijem plný ClapModel")
 
+        # dynamický batch: starý exporter = stringy, dynamo = objekty Dim
+        text_dyn_axes = {"input_ids": {0: "batch"},
+                         "attention_mask": {0: "batch"},
+                         "text_embeds": {0: "batch"}}
+        text_dyn_shapes = None
+        try:
+            from torch.export import Dim
+            _b = Dim("batch")
+            text_dyn_shapes = {"input_ids": {0: _b},
+                               "attention_mask": {0: _b}}
+        except Exception:
+            pass  # veľmi starý torch → fixný batch → embed_texts použije slučku
+
         with torch.no_grad():
             if light_model is not None:
                 _do_export(
@@ -695,7 +773,9 @@ def _internal_export(mode: str, onnx_dir: str) -> int:
                     (enc["input_ids"], enc["attention_mask"]),
                     os.path.join(onnx_dir, TEXT_ONNX_NAME),
                     input_names=["input_ids", "attention_mask"],
-                    output_names=["text_embeds"])
+                    output_names=["text_embeds"],
+                    dynamic_axes=text_dyn_axes,
+                    dynamic_shapes=text_dyn_shapes)
             else:
                 model = _load_full()
                 _free(model, ("clap_audio", "audio_model"))
@@ -743,10 +823,14 @@ def _cli() -> int:
 
     print(f"\nSúbor:  {path}")
     print(f"Backend: {result.backend}")
+    print(f"Analyzovaných okien: {result.segments_used} × {CLIP_SECONDS} s")
     print("Poradie kandidátov:")
     for desc, p in result.ranking:
         marker = "  ← NAJLEPŠIE" if desc == result.best_description else ""
         print(f"  {p * 100:5.1f} %  {desc}{marker}")
+    margin_note = ("spoľahlivé" if result.margin > 0.15
+                   else "nejednoznačné – skúste viac/lepšie popisy")
+    print(f"\nNáskok pred 2. kandidátom: {result.margin * 100:.1f} %bodov ({margin_note})")
 
     msg = write_metadata(path, result.best_description, result.confidence)
     print(f"\nZapísané do metadát ({msg}): ‘{result.best_description}’")

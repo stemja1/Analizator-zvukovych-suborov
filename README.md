@@ -60,18 +60,30 @@ je rýchle — načítajú sa existujúce ONNX súbory.
 ## Použitie
 
 1. Kliknite na **Pridať súbory…** / **Pridať priečinok…** (alebo presuňte
-   súbory myšou do okna).
-2. Vpravo upravte **kandidátske popisy** — jeden na riadok, po anglicky
-   (CLAP je trénovaný na anglických textoch), napr.:
+   súbory myšou do okna). Výber priečinka prehľadá **aj všetky podpriečinky**
+   (rekurzívne, s prirodzeným triedením `file2 < file10`; skryté a systémové
+   priečinky sa preskakujú).
+2. Vpravo vyberte **predvoľbu popisov** (SFX pre film/reklamu ~170 popisov,
+   pôvodný zoznam, rýchly štart) a pole podľa potreby upravte — jeden popis
+   na riadok, po anglicky (CLAP je trénovaný na anglických textoch), riadky
+   začínajúce `#` sú sekcie a do analýzy sa nezapočítavajú. Napr.:
    ```
    heavy rain falling on roof
    dog barking outdoors
    car engine revving
    birds singing in the forest
    ```
-3. (Voliteľné) zaškrtnite *„Zapísať aj istotu do popisu"*.
-4. **▶ Spustiť AI analýzu** — priebeh vidno v tabuľke aj progress bare,
-   GUI počas behu nijako nezamrzá (práca beží vo vlákne na pozadí).
+3. **Úseky na súbor (presnosť)** — koľko 10-sekundových okien sa v každom
+   súbore analyzuje a spriemeruje (1 = len stred, rýchle; **4 = odporúčané**;
+   8 = maximum). Zvyšuje presnosť pri dlhších súboroch s premenlivým obsahom.
+4. (Voliteľné) zaškrtnite *„Zapísať aj istotu do popisu"*.
+5. **▶ Spustiť AI analýzu** — priebeh vidno v tabuľke, progress bare
+   (**percentá + odhad zostávajúceho času**) a logu; GUI počas behu
+   nijako nezamrzá (práca beží vo vlákne na pozadí).
+
+V stĺpci **Detail** u hotového súboru uvidíte okrem istoty aj **náskok**
+pred druhým kandidátom — malý náskok (napr. +5 %) znamená nejednoznačný
+výsledok a znamenie, že zoznam popisov treba spresniť.
 
 Popisy sa dajú po dokončení prečítať napr. vo vlastnostiach súboru
 (Windows Explorer → Podrobnosti → Komentár) alebo v ľubovoľnom tagery.
