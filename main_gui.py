@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import traceback
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -154,6 +155,7 @@ class MainWindow(QMainWindow):
         self._path_set: set[str] = set()
         self.worker: AnalysisWorker | None = None
         self.analyzer: ClapAnalyzer | None = None  # cache – znovupoužitý naprieč behmi
+        self._batch_start_ts: float | None = None
 
         self._build_ui()
         self._connect_actions()
@@ -223,6 +225,10 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         left.addWidget(self.progress)
+
+        self.lbl_eta = QLabel("")
+        self.lbl_eta.setStyleSheet("color: #666; font-size: 11px;")
+        left.addWidget(self.lbl_eta)
 
         row3 = QHBoxLayout()
         self.lbl_backend = QLabel("Backend: ešte neznámy (spustite analýzu)")
@@ -412,7 +418,7 @@ class MainWindow(QMainWindow):
                                      self.chk_score.isChecked(),
                                      analyzer=self.analyzer)
         self.worker.row_status.connect(self.on_row_status)
-        self.worker.value.connect(self.progress.setValue)
+        self.worker.value.connect(self.on_progress_value)
         self.worker.log_line.connect(self.log)
         self.worker.phase.connect(self.on_phase)
         self.worker.backend_ready.connect(self.on_backend)
@@ -432,13 +438,42 @@ class MainWindow(QMainWindow):
             self.table.scrollToItem(self.table.item(row, 1),
                                     QAbstractItemView.ScrollHint.EnsureVisible)
 
+    def on_progress_value(self, value: int) -> None:
+        self.progress.setValue(value)
+        total = len(self.file_paths)
+        if self._batch_start_ts is None or value <= 0 or total <= 0:
+            return
+        elapsed = time.time() - self._batch_start_ts
+        avg = elapsed / value
+        remaining = avg * (total - value)
+        self.lbl_eta.setText(
+            f"Odhad do konca: {self._fmt_duration(remaining)}  "
+            f"(priemer {avg:.1f} s/súbor, spracované {value}/{total})")
+
+    @staticmethod
+    def _fmt_duration(seconds: float) -> str:
+        seconds = max(0, int(round(seconds)))
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h} h {m} min"
+        if m:
+            return f"{m} min {s} s"
+        return f"{s} s"
+
     def on_phase(self, phase: str) -> None:
         if phase == "model":
             self.progress.setRange(0, 0)
             self.progress.setFormat("Pripravujem model (prvýkrát: download + export)…")
+            self._batch_start_ts = None
+            self.lbl_eta.setText(
+                "Prvé spustenie môže trvať niekoľko minút (stiahnutie modelu "
+                "+ jednorazový export do ONNX). Ďalšie spustenia appky budú rýchle.")
         else:
             self.progress.setRange(0, len(self.file_paths))
-            self.progress.setFormat("%v / %m")
+            self.progress.setFormat("%p%  (%v / %m súborov)")
+            self._batch_start_ts = time.time()
+            self.lbl_eta.setText("Odhad do konca: počítam…")
 
     def on_backend(self, info: str) -> None:
         self.lbl_backend.setText(f"Backend: {info}")
@@ -451,6 +486,8 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self.progress.setRange(0, 1)
         self.progress.setFormat("")
+        self._batch_start_ts = None
+        self.lbl_eta.setText("")
         if self.worker:
             self.analyzer = self.worker.analyzer  # cache pre ďalší beh
             self.worker.deleteLater()
