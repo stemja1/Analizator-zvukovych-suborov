@@ -180,8 +180,13 @@ class MainWindow(QMainWindow):
         row1 = QHBoxLayout()
         self.btn_add_files = QPushButton("＋ Pridať súbory…")
         self.btn_add_dir = QPushButton("📂 Pridať priečinok…")
+        self.btn_auto_dir = QPushButton("⚡ Automaticky spracovať priečinok…")
+        self.btn_auto_dir.setToolTip(
+            "Vyberie priečinok, nahradí ním aktuálny zoznam súborov\n"
+            "a rovno spustí AI analýzu všetkých podporovaných súborov v ňom.")
         row1.addWidget(self.btn_add_files)
         row1.addWidget(self.btn_add_dir)
+        row1.addWidget(self.btn_auto_dir)
         left.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -269,9 +274,9 @@ class MainWindow(QMainWindow):
                 if ln.strip()]
 
     def _set_busy(self, busy: bool) -> None:
-        for btn in (self.btn_add_files, self.btn_add_dir, self.btn_remove,
-                    self.btn_clear, self.btn_start, self.txt_descriptions,
-                    self.chk_score):
+        for btn in (self.btn_add_files, self.btn_add_dir, self.btn_auto_dir,
+                    self.btn_remove, self.btn_clear, self.btn_start,
+                    self.txt_descriptions, self.chk_score):
             btn.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
 
@@ -326,6 +331,35 @@ class MainWindow(QMainWindow):
         self._add_paths(audio)
         if not audio:
             self.log(f"V priečinku {d} neboli nájdené žiadne podporované súbory.")
+
+    def auto_process_folder(self) -> None:
+        """Vyberie priečinok, nahradí ním zoznam a rovno spustí analýzu."""
+        if self.worker and self.worker.isRunning():
+            return
+        d = QFileDialog.getExistingDirectory(
+            self, "Vyberte priečinok na automatické spracovanie")
+        if not d:
+            return
+        names = [os.path.join(d, n) for n in sorted(os.listdir(d))]
+        audio = [p for p in names
+                 if os.path.splitext(p)[1].lower() in SUPPORTED_EXTENSIONS]
+        if not audio:
+            QMessageBox.information(
+                self, "Žiadne súbory",
+                f"V priečinku „{d}“ neboli nájdené žiadne podporované "
+                f"zvukové súbory (WAV/MP3/OGG/FLAC).")
+            return
+
+        self.clear_all()
+        self._add_paths(audio)
+
+        if not self.descriptions():
+            self.txt_descriptions.setPlainText(DEFAULT_DESCRIPTIONS)
+            self.log("Zoznam popisov bol prázdny – použil sa predvolený zoznam.")
+
+        self.log(f"⚡ Automatické spracovanie: {len(audio)} súborov "
+                 f"z „{d}“.")
+        self.start_analysis()
 
     def remove_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedIndexes()},
@@ -478,6 +512,7 @@ class MainWindow(QMainWindow):
     def _connect_actions(self) -> None:
         self.btn_add_files.clicked.connect(self.add_files_dialog)
         self.btn_add_dir.clicked.connect(self.add_dir_dialog)
+        self.btn_auto_dir.clicked.connect(self.auto_process_folder)
         self.btn_remove.clicked.connect(self.remove_selected)
         self.btn_clear.clicked.connect(self.clear_all)
         self.btn_start.clicked.connect(self.start_analysis)
