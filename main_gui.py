@@ -18,7 +18,7 @@ import os
 import sys
 import traceback
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
@@ -157,8 +157,8 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_actions()
-        self.log(f"Aplikácia spustená. Pridajte súbory (tlačidlom alebo presunte myšou) "
-                 f"a definujte zoznam popisov vpravo.")
+        self.log("Aplikácia spustená. Pridajte súbory (tlačidlom alebo presunte myšou) "
+                 "a definujte zoznam popisov vpravo.")
 
     # --- stavanie UI ---------------------------------------------------------
     def _build_ui(self) -> None:
