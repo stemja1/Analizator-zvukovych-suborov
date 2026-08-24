@@ -47,14 +47,91 @@ ST_COLORS = {
 
 FILE_FILTER = "Zvukové súbory (*.wav *.mp3 *.ogg *.flac);;Všetky súbory (*.*);;WAV (*.wav);;MP3 (*.mp3);;OGG (*.ogg);;FLAC (*.flac)"
 
-DEFAULT_DESCRIPTIONS = (
-    "whistle sound in midnight\n"
-    "heavy rain falling on roof\n"
-    "car engine revving\n"
-    "dog barking outdoors\n"
-    "birds singing in the forest\n"
-    "people talking in a room"
-)
+DEFAULT_DESCRIPTIONS = "\n".join([
+    # tranzície / whoosh
+    "a fast whoosh sound effect",
+    "a deep cinematic whoosh",
+    "a metal whoosh transition sound",
+    "a swipe transition sound effect",
+    "an air whoosh passing by",
+    # impacty / hity
+    "a heavy cinematic impact hit",
+    "a deep bass impact hit",
+    "a dramatic braam impact sound",
+    "a punch hit sound effect",
+    "a metal clang impact sound",
+    # risery / napätie
+    "a rising tension riser sound",
+    "a suspenseful build-up riser",
+    "a horror tension sting sound",
+    # sub / bass
+    "a deep sub bass drop",
+    "a low frequency bass rumble",
+    # glitch / digitálne
+    "a digital glitch sound effect",
+    "a glitchy stutter sound",
+    "a data error glitch beep",
+    "an electronic malfunction sound",
+    # kamera / foto
+    "a camera shutter click",
+    "a camera flash sound",
+    "an old film camera shutter sound",
+    # UI / tech / interface
+    "a computer mouse click sound",
+    "a mechanical keyboard typing sound",
+    "a keyboard key press sound",
+    "a notification beep sound",
+    "a user interface click sound",
+    "a phone ringtone sound",
+    "a radio tuning static sound",
+    "a radio dial adjustment sound",
+    "a robotic beeping sound",
+    "a sci-fi interface sound effect",
+    "a spaceship engine hum",
+    # výbuchy / zbrane
+    "an explosion sound effect",
+    "a gunshot sound effect",
+    "a sword clashing sound",
+    "an arrow whoosh sound",
+    "a laser blast sound effect",
+    "fireworks exploding",
+    # vozidlá
+    "car engine revving",
+    "a car door closing",
+    "car tires screeching",
+    "an airplane flying overhead",
+    "a helicopter blade whoosh",
+    "a train passing by",
+    # foley / mechanika
+    "footsteps on a wood floor",
+    "footsteps on gravel",
+    "a door creaking open",
+    "glass breaking sound",
+    "metal chains rattling",
+    "a clock ticking sound",
+    "an alarm siren sound",
+    "cloth rustling sound",
+    "a paper page turning sound",
+    # príroda / počasie / ambient
+    "heavy rain falling on roof",
+    "thunder rumbling in the distance",
+    "wind blowing strongly",
+    "fire crackling sound",
+    "water splashing sound",
+    "waves crashing on the shore",
+    "birds singing in the forest",
+    # ľudia / dav (bez reči)
+    "people talking in a room",
+    "a crowd cheering and applauding",
+    "children laughing",
+    "a heartbeat sound effect",
+    # zvieratá
+    "dog barking outdoors",
+    "a cat meowing",
+    # mágia / fantasy / sci-fi
+    "a magic spell casting sound",
+    "an energy charging sound effect",
+])
 
 
 # ---------------------------------------------------------------------------
