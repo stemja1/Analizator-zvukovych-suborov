@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -53,6 +54,37 @@ TARGET_SR = 48_000      # Hz – CLAP pracuje s 48 kHz audiom
 CLIP_SECONDS = 10       # CLAP bol trénovaný na 10-sekundových klipoch
 DEFAULT_SEGMENTS = 4    # počet 10 s okien na súbor (viac = presnejšie, pomalšie)
 MAX_FULL_DECODE_SECONDS = 1200   # nad 20 min sa celý súbor nenačítava (RAM)
+
+# --- názov súboru ako pomôcka pri triedení -----------------------------------
+# Slová z názvu (napr. „whoosh_final_2.wav“ → „whoosh“) sa porovnávajú
+# s kandidátnymi popismi. Ak slovo na víťazný popis sedí, ide o dôkaz –
+# istota sa zvýši NÁSOBENÍM (nikdy nad 99 %): 60 % → 78 %, 70 % → 91 %.
+NAME_MIN_WORD_LEN = 4        # kratšie slová sú väčšinou šum (max, ver, cut…)
+NAME_SKIP_MIN_WORD_LEN = 5   # 1 dlhé slovo stačí na preskočenie AI
+NAME_BOOST_FACTOR = 1.3      # istota × 1,3 keď názov podporí víťaza
+NAME_BOOST_CAP = 0.99        # strop – 100 % nikdy neukazujeme
+AUDIO_SIM_MIN = 0.80         # podobnosť zvuku s naučeným vzorom = dôkaz
+AUDIO_SIM_BOOST = 1.2        # istota × 1,2 keď zvuk sedí na naučený vzor
+MULTI_RATIO = 0.4            # 2. popis sa zapíše, ak má ≥ 40 % priemeru víťaza
+MULTI_EXTRA_MAX = 2          # max počet ďalších popisov (spolu max 3)
+PATTERN_MAX_PER_LABEL = 30   # koľko zvukových vzorov si pamätať na popis
+
+# všeobecné slová, ktoré o obsahu nič nehovoria – pri triedení sa ignorujú
+NAME_STOPWORDS = {
+    "sound", "sounds", "audio", "zvuk", "zvuky", "zvukova", "zvukove",
+    "nahravka", "nahravky", "rec", "recording", "record", "file", "subor",
+    "subory", "final", "finalna", "finalne", "mix", "demo", "test",
+    "testovaci", "novy", "nova", "nove", "stary", "stara", "kopie",
+    "kopija", "copy", "track", "sample", "samples", "edit", "uprava",
+    "upraveny", "cut", "rez", "video", "wav", "mp3", "flac", "ogg",
+    "the", "and", "with", "from", "this", "new", "old", "max", "min",
+    "ver", "version", "hlas", "song", "klip", "full", "free", "best",
+    "good", "diag", "diagnoza", "vyrok", "siec", "sit", "train",
+}
+
+# --- paralelné dekódovanie na pozadí (pipelining s GPU) ----------------------
+PREFETCH_WORKERS = 2         # vlákna na dekódovanie (CPU beží paralelne s GPU)
+PREFETCH_DEPTH = 3           # koľko súborov max. vopred v zásobníku
 
 SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac"}
 
@@ -174,6 +206,90 @@ def write_metadata(file_path: str, description: str,
 # Windows / RIFF INFO je práve LIST INFO s položkou ICMT – preto vlastný,
 # minimálny a bezpečný writer (súbory prepisuje chunk-po-chunku).
 # ---------------------------------------------------------------------------
+def read_description(file_path: str) -> str:
+    """Prečíta popis, ktorý do súboru zapísala táto appka (inak prázdne)."""
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == ".mp3":
+            try:
+                tags = ID3(file_path)
+            except ID3NoHeaderError:
+                return ""
+            for frame in tags.getall("COMM"):
+                if frame.desc == "Description":
+                    return str(frame.text[0]) if frame.text else ""
+            return ""
+        if ext in (".flac", ".ogg"):
+            tags = FLAC(file_path) if ext == ".flac" else OggVorbis(file_path)
+            val = tags.get("DESCRIPTION")
+            return str(val[0]) if val else ""
+        if ext == ".wav":
+            return _read_wav_icmt(file_path)
+    except Exception:
+        return ""
+    return ""
+
+
+def remove_description(file_path: str) -> str:
+    """ZMAŽE popis z vlastností súboru. Vráti krátku správu do logu.
+
+    Použitie: keď nová istota klesne pod prah, radšej žiaden popis
+    ako nezmysel – a starý (nízko istotný) popis sa odstráni.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".mp3":
+        try:
+            tags = ID3(file_path)
+        except ID3NoHeaderError:
+            return "už bolo prázdne"
+        tags.delall("COMM")
+        tags.save(file_path, v1=0)
+        return "starý popis zmazaný (ID3)"
+    if ext in (".flac", ".ogg"):
+        tags = FLAC(file_path) if ext == ".flac" else OggVorbis(file_path)
+        if "DESCRIPTION" in tags:
+            del tags["DESCRIPTION"]
+            tags.save()
+            return "starý popis zmazaný (Vorbis DESCRIPTION)"
+        return "už bolo prázdne"
+    if ext == ".wav":
+        return _remove_wav_icmt(file_path)
+    raise ValueError(f"Nepodporovaný typ súboru: {ext} ({file_path})")
+
+
+def _remove_wav_icmt(file_path: str) -> str:
+    """Zmaže LIST/INFO chunk s popisom z WAV súboru."""
+    import struct
+    with open(file_path, "rb") as f:
+        data = f.read()
+    if len(data) < 12 or data[0:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError(f"{file_path}: nie je platný WAV (RIFF/WAVE) súbor")
+    chunks: list[tuple[bytes, bytes]] = []
+    pos, removed = 12, False
+    while pos + 8 <= len(data):
+        cid = data[pos:pos + 4]
+        size = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        if pos + 8 + size > len(data):
+            raise ValueError(f"{file_path}: poškodený WAV chunk {cid!r}")
+        payload = data[pos + 8:pos + 8 + size]
+        if cid == b"LIST" and payload[0:4] == b"INFO":
+            removed = True                 # celý INFO blok píšeme len my
+        else:
+            chunks.append((cid, payload))
+        pos += 8 + size + (size & 1)
+    if not removed:
+        return "už bolo prázdne"
+    body = bytearray(b"WAVE")
+    for cid, payload in chunks:
+        body += cid + struct.pack("<I", len(payload)) + payload
+        if len(payload) & 1:
+            body += b"\x00"
+    out = b"RIFF" + struct.pack("<I", len(body)) + bytes(body)
+    with open(file_path, "wb") as f:
+        f.write(out)
+    return "starý popis zmazaný (RIFF INFO)"
+
+
 def _write_wav_icmt(file_path: str, text: str) -> None:
     import struct
 
@@ -241,6 +357,195 @@ def _read_wav_icmt(file_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Názov súboru ako pomôcka + „učenie“ (slová aj zvukové vzory)
+# ---------------------------------------------------------------------------
+LEARNED_FILE = os.path.join(_HERE, "naucene_spojenia.json")
+PATTERNS_FILE = os.path.join(_HERE, "naucene_vzory.npz")
+
+
+def filename_keywords(file_path: str) -> list[str]:
+    """Významové ANGLICKÉ slová z názvu súboru (bez čísel a všeobecných slov).
+
+    „whoosh_final_2.wav“ → [„whoosh“]; „dog_barking_03.mp3“ → [„dog“, „barking“]
+    Slová s diakritikou (napr. „zvonenie“, „hodín“) sa IGNORUJÚ – učenie a
+    párovanie s popismi funguje len na anglické názvy súborov (popisy
+    CLAP modelu sú anglické, slovenské názvy by len znížili presnosť).
+    """
+    base = os.path.splitext(os.path.basename(file_path))[0].lower()
+    words = [w for w in re.findall(r"[^\W\d_]+", base, re.UNICODE)
+             if len(w) >= NAME_MIN_WORD_LEN and w.isascii()
+             and w not in NAME_STOPWORDS]
+    out: list[str] = []
+    for w in words:
+        if w not in out:
+            out.append(w)
+    return out
+
+
+def keyword_in_description(keyword: str, description: str) -> bool:
+    """Sedí kľúčové slovo na popis? Podreťazec; „birds“ sedí aj na „bird“."""
+    d = description.lower()
+    if keyword in d:
+        return True
+    if keyword.endswith("s") and len(keyword) > NAME_MIN_WORD_LEN:
+        return keyword[:-1] in d
+    return False
+
+
+def name_matches_description(file_path: str, description: str,
+                             learned: dict | None = None) -> bool:
+    """Sedí nejaké slovo z názvu na popis (textovo alebo naučene)?"""
+    for k in filename_keywords(file_path):
+        if keyword_in_description(k, description):
+            return True
+        assoc = (learned or {}).get(k)
+        if assoc and assoc.get(description, 0) >= 1:
+            return True
+    return False
+
+
+def name_skip_description(file_path: str, descriptions: list[str],
+                          learned: dict | None = None) -> str | None:
+    """Popis, ak NÁZOV súboru jednoznačne určuje práve jeden popis.
+
+    Konzervatívne podmienky (AI sa nesmie preskočiť len tak):
+    * ≥ 2 slová z názvu sedia na ten istý popis a nikto iný nemá toľko,
+      ALEBO 1 dlhé slovo (≥ 5 znakov) sedí len na jeden popis,
+      ALEBO naučené spojenie: slovo už 2× viedlo k rovnakému popisu.
+    Pri remíze → None (beží AI). Vrátený popis sa zapíše bez AI.
+    """
+    kws = filename_keywords(file_path)
+    if not kws:
+        return None
+    hits = [sum(1 for k in kws if keyword_in_description(k, d))
+            for d in descriptions]
+    best_i = max(range(len(descriptions)), key=lambda i: hits[i])
+    best = hits[best_i]
+    if best > 0 and hits.count(best) == 1:
+        strong = best >= 2 or any(
+            len(k) >= NAME_SKIP_MIN_WORD_LEN
+            and keyword_in_description(k, descriptions[best_i]) for k in kws)
+        if strong:
+            return descriptions[best_i]
+    if learned:
+        for k in kws:
+            assoc = learned.get(k)
+            if not assoc:
+                continue
+            tops = [d for d, n in assoc.items() if n >= 2]
+            if len(tops) == 1 and assoc[tops[0]] >= 2 \
+                    and tops[0] in descriptions:
+                return tops[0]
+    return None
+
+
+def load_learned() -> dict:
+    """Naučené spojenia slovo → {popis: počet} (naucene_spojenia.json)."""
+    try:
+        with open(LEARNED_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_learned(learned: dict) -> None:
+    try:
+        with open(LEARNED_FILE, "w", encoding="utf-8") as f:
+            json.dump(learned, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass                                # bez učenia sa beží ďalej
+
+
+def learn_words(file_path: str, description: str,
+                descriptions: list[str],
+                learned: dict | None = None) -> list[str]:
+    """Zapamätá si spojenia slovo z názvu → priradený popis.
+
+    Učí sa len slová, ktoré v žiadnom popise nie sú (inak nič nové
+    nenaučí). Mení `learned` v pamäti; ukladať treba cez save_learned().
+    Vráti zoznam novo zapamätaných slov (na log).
+    """
+    learned_now: list[str] = []
+    learned = learned if learned is not None else load_learned()
+    for k in filename_keywords(file_path):
+        if any(keyword_in_description(k, d) for d in descriptions):
+            continue
+        counts = learned.setdefault(k, {})
+        counts[description] = counts.get(description, 0) + 1
+        if len(counts) > 3:                 # pamäť: max 3 popisy na slovo
+            for d, _ in sorted(counts.items(), key=lambda kv: kv[1])[:-3]:
+                del counts[d]
+        learned_now.append(k)
+    return learned_now
+
+
+def load_patterns() -> dict:
+    """Naučené zvukové vzory: {'emb': (N, D), 'label': [str]}.
+
+    Každý istý výsledok (popis + embedding zvuku) si program pamätá ako
+    „vzor“ – podľa podobnosti zvuku potom vie radšej tipnúť aj súbory
+    s nevravným názvom.
+    """
+    try:
+        z = np.load(PATTERNS_FILE, allow_pickle=False)
+        emb = z["emb"].astype(np.float32)
+        label = [str(x) for x in z["label"]]
+        if emb.ndim == 2 and len(label) == emb.shape[0] and emb.shape[0]:
+            return {"emb": emb, "label": label}
+    except Exception:
+        pass
+    return {"emb": np.zeros((0, 1), np.float32), "label": []}
+
+
+def save_patterns(patterns: dict) -> None:
+    try:
+        emb = np.asarray(patterns.get("emb"), np.float32)
+        if emb.ndim != 2 or emb.shape[0] == 0:
+            return
+        np.savez_compressed(PATTERNS_FILE, emb=emb,
+                            label=np.array(patterns.get("label", [])))
+    except Exception:
+        pass
+
+
+def add_pattern(patterns: dict, embedding: np.ndarray, label: str) -> None:
+    """Pridá zvukový vzor (embedding → popis) do pamäti vzorov."""
+    v = np.asarray(embedding, np.float32).reshape(1, -1)
+    labels = patterns.get("label", [])
+    emb = patterns.get("emb")
+    if not labels or emb is None or emb.shape[0] == 0 \
+            or emb.shape[1] != v.shape[1]:
+        patterns["emb"], patterns["label"] = v, [label]
+        return
+    same = [i for i, l in enumerate(labels) if l == label]
+    if len(same) >= PATTERN_MAX_PER_LABEL:  # zahodiť najstarší vzor popisu
+        drop = same[0]
+        keep = [j for j in range(len(labels)) if j != drop]
+        patterns["emb"] = emb[keep]
+        patterns["label"] = [labels[j] for j in keep]
+    patterns["emb"] = np.vstack([patterns["emb"], v])
+    patterns["label"].append(label)
+
+
+def find_similar_pattern(embedding: np.ndarray,
+                         patterns: dict) -> tuple[str, float]:
+    """Najpodobnejší naučený zvukový vzor → (popis, podobnosť 0..1)."""
+    emb, labels = patterns.get("emb"), patterns.get("label", [])
+    if emb is None or not labels or emb.shape[0] != len(labels) \
+            or emb.shape[0] == 0:
+        return ("", 0.0)
+    v = np.asarray(embedding, np.float32).ravel()
+    if emb.shape[1] != v.shape[0]:
+        return ("", 0.0)
+    norm_e = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
+    v = v / (np.linalg.norm(v) + 1e-9)
+    sims = norm_e @ v
+    i = int(np.argmax(sims))
+    return (labels[i], float(sims[i]))
+
+
+# ---------------------------------------------------------------------------
 # Výsledok analýzy
 # ---------------------------------------------------------------------------
 @dataclass
@@ -253,8 +558,17 @@ class AnalysisResult:
     segments_used: int                    # počet analyzovaných 10 s okien
     decode_time: float = 0.0              # načítanie/dekódovanie súboru (s)
     infer_time: float = 0.0               # GPU/CPU inference (s)
+    name_boosted: bool = False            # názov súboru podporil výber
+    pattern_boosted: bool = False         # naučený zvukový vzor podporil výber
+    skipped_by_name: bool = False         # AI preskočená (jednoznačný názov)
+    additional: list = None               # ďalšie popisy [(popis, podiel)]
+    audio_embedding: object = None        # spriemerovaný CLAP embedding zvuku
     backend: str = ""
     elapsed: float = 0.0
+
+    def __post_init__(self):
+        if self.additional is None:
+            self.additional = []
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +659,10 @@ class ClapAnalyzer:
 
     def analyze_file(self, file_path: str,
                      candidate_descriptions: list[str],
-                     segments: int = DEFAULT_SEGMENTS) -> AnalysisResult:
+                     segments: int = DEFAULT_SEGMENTS,
+                     use_name_hint: bool = True,
+                     learned: dict | None = None,
+                     patterns: dict | None = None) -> AnalysisResult:
         """Vráti najlepší popis pre daný zvukový súbor + celé poradie.
 
         Presnosť: súbor sa analyzuje v `segments` rovnomerne rozmiestených
@@ -377,15 +694,58 @@ class ClapAnalyzer:
         best = int(order[0])
         second = float(probs[int(order[1])]) if len(order) > 1 else 0.0
 
+        # --- viac popisov, ak nahrávka obsahuje viac typov zvuku ----------
+        # Popis sa pridá, ak aspoň v jednom okne VYHRÁ a jeho priemerná
+        # pravdepodobnosť má ≥ MULTI_RATIO priemeru víťaza (je výrazne
+        # prítomný v nahrávke, nie len náhoda v jednom okne).
+        additional: list[tuple[str, float]] = []
+        if n_windows >= 2:
+            w_logits = (text_emb @ embs.T) * float(
+                self._meta.get("logit_scale", 100.0))
+            w_probs = np.stack(
+                [_softmax(w_logits[:, j].astype(np.float64))
+                 for j in range(n_windows)], axis=1)      # (D, n_windows)
+            winners = np.argmax(w_probs, axis=0)
+            best_mean = float(probs[best])
+            extra = []
+            for j in range(len(candidate_descriptions)):
+                if j == best:
+                    continue
+                mean_p = float(probs[j])
+                if int((winners == j).sum()) >= 1 \
+                        and mean_p >= MULTI_RATIO * best_mean:
+                    extra.append((j, mean_p))
+            extra.sort(key=lambda t: -t[1])
+            additional = [(candidate_descriptions[j], mean_p)
+                          for j, mean_p in extra[:MULTI_EXTRA_MAX]]
+
+        # --- istota: posilnenie názvom súboru a naučeným zvukovým vzorom --
+        conf = float(probs[best])
+        name_boosted = pattern_boosted = False
+        if use_name_hint and name_matches_description(
+                file_path, candidate_descriptions[best], learned):
+            conf = min(NAME_BOOST_CAP, conf * NAME_BOOST_FACTOR)
+            name_boosted = True
+        if patterns is not None:
+            sim_label, sim = find_similar_pattern(audio_emb, patterns)
+            if sim_label == candidate_descriptions[best] \
+                    and sim >= AUDIO_SIM_MIN:
+                conf = min(NAME_BOOST_CAP, conf * AUDIO_SIM_BOOST)
+                pattern_boosted = True
+
         return AnalysisResult(
             file_path=file_path,
             best_description=candidate_descriptions[best],
-            confidence=float(probs[best]),
+            confidence=conf,
             ranking=[(candidate_descriptions[i], float(probs[i])) for i in order],
             margin=float(probs[best]) - second,
             segments_used=n_windows,
             decode_time=decode_time,
             infer_time=infer_time,
+            name_boosted=name_boosted,
+            pattern_boosted=pattern_boosted,
+            additional=additional,
+            audio_embedding=audio_emb,
             backend=self.backend_info,
             elapsed=time.time() - t0,
         )
@@ -461,10 +821,10 @@ class ClapAnalyzer:
         import concurrent.futures
         if self._pool is None:
             self._pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="clap-preload")
+                max_workers=PREFETCH_WORKERS, thread_name_prefix="clap-preload")
         if file_path in self._prefetches:
             return
-        while len(self._prefetches) >= 2:
+        while len(self._prefetches) >= PREFETCH_DEPTH:
             old_path, old_fut = next(iter(self._prefetches.items()))
             old_fut.cancel()
             del self._prefetches[old_path]

@@ -22,3 +22,7 @@ test_output/
 
 # externé ONNX váhy (dynamo export)
 *.onnx.data
+
+# naučené dáta (vznikajú pri používaní appky)
+naucene_spojenia.json
+naucene_vzory.npz

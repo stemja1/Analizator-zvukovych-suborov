@@ -30,7 +30,10 @@ from PyQt6.QtWidgets import (
 )
 
 from core_analyzer import (DEFAULT_SEGMENTS, SUPPORTED_EXTENSIONS, ClapAnalyzer,
-                           write_metadata)
+                           add_pattern, learn_words, load_learned,
+                           load_patterns, name_skip_description,
+                           read_description, remove_description,
+                           save_learned, save_patterns, write_metadata)
 
 # --- prehrávanie súborov (kontrola zvuk ↔ priradený popis) -------------------
 # QtMultimedia je samostatný súčasť PyQt6; ak chýba, appka beží normálne,
@@ -50,6 +53,7 @@ ST_RUNNING = "Spracováva sa…"
 ST_DONE = "Hotovo"
 ST_ERROR = "Chyba"
 ST_SKIPPED = "Preskočené"
+ST_LOWCONF = "Nízka istota"
 
 ST_COLORS = {
     ST_WAITING: QColor("#8a8a8a"),
@@ -57,6 +61,7 @@ ST_COLORS = {
     ST_DONE: QColor("#2e9e44"),
     ST_ERROR: QColor("#d03a3a"),
     ST_SKIPPED: QColor("#8a8a8a"),
+    ST_LOWCONF: QColor("#e08a00"),
 }
 
 FILE_FILTER = "Zvukové súbory (*.wav *.mp3 *.ogg *.flac);;Všetky súbory (*.*);;WAV (*.wav);;MP3 (*.mp3);;OGG (*.ogg);;FLAC (*.flac)"
@@ -359,18 +364,22 @@ class AnalysisWorker(QThread):
     log_line = pyqtSignal(str)                    # riadok do logu
     phase = pyqtSignal(str)                       # 'model' | 'batch'
     backend_ready = pyqtSignal(str)               # info o použitom backendu
-    finished_batch = pyqtSignal(int, int, bool)   # ok, chyby, zrušené
+    finished_batch = pyqtSignal(int, int, int, int, bool)  # ok, chyby, nízka ist., podľa názvu, zrušené
 
     def __init__(self, files: list[str], descriptions: list[str],
                  include_score: bool = False,
                  segments: int = DEFAULT_SEGMENTS,
-                 analyzer: ClapAnalyzer | None = None, parent=None):
+                 analyzer: ClapAnalyzer | None = None,
+                 min_confidence: float = 0.5,
+                 skip_by_name: bool = True, parent=None):
         super().__init__(parent)
         self.files = list(files)
         self.descriptions = list(descriptions)
         self.include_score = include_score
         self.segments = max(1, int(segments))  # počet 10 s okien na súbor
         self.analyzer = analyzer  # znovupoužitý z predchádzajúceho behu, ak je hotový
+        self.min_confidence = max(0.0, min(0.95, float(min_confidence)))
+        self.skip_by_name = bool(skip_by_name)
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -378,48 +387,71 @@ class AnalysisWorker(QThread):
 
     # ------------------------------------------------------------------------
     def run(self) -> None:  # noqa: D102 – beží v samostatnom vlákne
-        ok = err = 0
+        ok = err = low = names = 0
 
-        # Model sa načíta len raz – ak už máme hotový analyzer z predošlého
-        # behu (audio_session != None), znovu ho nenačítavame, len prepojíme
-        # log na aktuálny worker.
-        if self.analyzer is None or self.analyzer.audio_session is None:
-            self.phase.emit("model")
-            if self.analyzer is None:
-                self.analyzer = ClapAnalyzer(log=self.log_line.emit)
+        # --- 1) súbory s jednoznačným názvom – AI sa pri nich preskočí ----
+        name_skips: dict[int, str] = {}
+        learned = load_learned()
+        if self.skip_by_name:
+            for i, p in enumerate(self.files):
+                d = name_skip_description(p, self.descriptions, learned)
+                if d:
+                    name_skips[i] = d
+        if name_skips:
+            self.log_line.emit(
+                f"⚡ {len(name_skips)} z {len(self.files)} súborov má "
+                f"jednoznačný názov – pri nich sa AI nepoužije.")
+        need_ai = len(self.files) - len(name_skips)
+        patterns = load_patterns()
+
+        # --- 2) model sa pripraví LEN ak je čo analyzovať AI ---------------
+        analyzer = None
+        if need_ai > 0:
+            # Model sa načíta len raz – ak už máme hotový analyzer
+            # z predošlého behu, znovu ho nenačítavame.
+            if self.analyzer is None or self.analyzer.audio_session is None:
+                self.phase.emit("model")
+                if self.analyzer is None:
+                    self.analyzer = ClapAnalyzer(log=self.log_line.emit)
+                else:
+                    self.analyzer._log = self.log_line.emit
+                try:
+                    self.analyzer.load()
+                except Exception as exc:  # model sa nepodarilo pripraviť
+                    self.log_line.emit(f"✖ Chyba pri príprave modelu: {exc}")
+                    self.log_line.emit(traceback.format_exc())
+                    for i in range(len(self.files)):
+                        self.row_status.emit(i, ST_ERROR, "",
+                                             "Model sa nepodarilo pripraviť")
+                    self.finished_batch.emit(0, len(self.files), 0, 0, False)
+                    return
             else:
                 self.analyzer._log = self.log_line.emit
+
+            analyzer = self.analyzer
+            self.backend_ready.emit(analyzer.backend_info)
+            self.phase.emit("batch")
+
+            # predvýpočet textových embeddingov (jednorazovo, cache)
             try:
-                self.analyzer.load()
-            except Exception as exc:  # model sa nepodarilo pripraviť
-                self.log_line.emit(f"✖ Chyba pri príprave modelu: {exc}")
-                self.log_line.emit(traceback.format_exc())
+                t_txt = time.time()
+                analyzer.embed_texts(self.descriptions)
+                self.log_line.emit(
+                    f"📝 Embeddingy {len(self.descriptions)} popisov hotové "
+                    f"za {time.time() - t_txt:.1f} s (cache).")
+            except Exception as exc:
+                err_text = str(exc).strip() or type(exc).__name__
+                self.log_line.emit(f"✖ Chyba pri embeddingoch popisov: {err_text}")
                 for i in range(len(self.files)):
-                    self.row_status.emit(i, ST_ERROR, "", "Model sa nepodarilo pripraviť")
-                self.finished_batch.emit(0, len(self.files), False)
+                    self.row_status.emit(i, ST_ERROR, "", err_text)
+                self.finished_batch.emit(0, len(self.files), 0, 0, False)
                 return
         else:
-            self.analyzer._log = self.log_line.emit
+            self.phase.emit("batch")
+            self.log_line.emit("⚡ Podľa názvov netreba AI – model sa nespúšťa.")
 
-        analyzer = self.analyzer
-        self.backend_ready.emit(analyzer.backend_info)
-        self.phase.emit("batch")
-
-        # predvýpočet textových embeddingov (jednorazovo, cacheované pre celý
-        # beh) – prvý súbor potom nie je "nafúknutý" o čas prípravy popisov
-        try:
-            t_txt = time.time()
-            analyzer.embed_texts(self.descriptions)
-            self.log_line.emit(f"📝 Embeddingy {len(self.descriptions)} popisov "
-                               f"hotové za {time.time() - t_txt:.1f} s (cache).")
-        except Exception as exc:
-            err_text = str(exc).strip() or type(exc).__name__
-            self.log_line.emit(f"✖ Chyba pri embeddingoch popisov: {err_text}")
-            for i in range(len(self.files)):
-                self.row_status.emit(i, ST_ERROR, "", err_text)
-            self.finished_batch.emit(0, len(self.files), False)
-            return
-
+        # --- 3) hlavný cyklus ------------------------------------------------
+        patterns_changed = False
         for i, path in enumerate(self.files):
             if self._cancelled:
                 self.row_status.emit(i, ST_SKIPPED, "", "")
@@ -427,27 +459,106 @@ class AnalysisWorker(QThread):
 
             self.row_status.emit(i, ST_RUNNING, "", "")
             try:
-                # Kým GPU analyzuje súbor i, dekóduje druhé vlákno na pozadí
-                # súbor i+1 (prefetch) – CPU a GPU práca sa prekrývajú.
-                if i + 1 < len(self.files):
-                    analyzer.preload(self.files[i + 1], self.segments)
-                result = analyzer.analyze_file(path, self.descriptions,
-                                               segments=self.segments)
-                conf = result.confidence if self.include_score else None
-                tag_msg = write_metadata(path, result.best_description, conf)
+                # (a) jednoznačný názov → rovno zapíš, AI preskoč
+                if i in name_skips:
+                    desc = name_skips[i]
+                    tag_msg = write_metadata(path, desc, None)
+                    self.row_status.emit(
+                        i, ST_DONE, desc,
+                        f"podľa názvu súboru (AI preskočená) | {tag_msg}")
+                    self.log_line.emit(
+                        f"⚡ {os.path.basename(path)} → ‘{desc}’ "
+                        f"(názov jednoznačne sedí)")
+                    names += 1
+                    try:
+                        for w in learn_words(path, desc,
+                                             self.descriptions, learned):
+                            self.log_line.emit(
+                                f"🧠 Naučené spojenie: ‘{w}’ → ‘{desc}’")
+                    except Exception:
+                        pass
+                else:
+                    # (b) AI analýza (s predstihovým dekódovaním ďalšieho)
+                    if analyzer is not None:
+                        nxt = i + 1
+                        while nxt < len(self.files) and nxt in name_skips:
+                            nxt += 1
+                        if nxt < len(self.files):
+                            analyzer.preload(self.files[nxt], self.segments)
+                        result = analyzer.analyze_file(
+                            path, self.descriptions, segments=self.segments,
+                            learned=learned, patterns=patterns)
 
-                top3 = "; ".join(f"{d} ({p * 100:.0f} %)"
-                                 for d, p in result.ranking[:3])
-                detail = (f"istota {result.confidence * 100:.0f} % | "
-                          f"náskok +{result.margin * 100:.0f} % | "
-                          f"{result.segments_used}× okno · 1 dekód · "
-                          f"dekód {result.decode_time:.1f} s / GPU "
-                          f"{result.infer_time:.1f} s | {tag_msg}")
-                self.row_status.emit(i, ST_DONE, result.best_description, detail)
-                self.log_line.emit(
-                    f"✔ {os.path.basename(path)} → ‘{result.best_description}’ "
-                    f"({result.confidence * 100:.0f} %, náskok +{result.margin * 100:.0f} %) | {top3}")
-                ok += 1
+                    if result.confidence < self.min_confidence:
+                        # nízká istota → popis NEzapísať, starý zmazať
+                        old = read_description(path)
+                        removed = ""
+                        if old and self._old_is_ours(old):
+                            removed = " | " + remove_description(path)
+                        self.row_status.emit(
+                            i, ST_LOWCONF,
+                            f"(tip: {result.best_description})",
+                            f"istota {result.confidence * 100:.0f} % < "
+                            f"{self.min_confidence * 100:.0f} % "
+                            f"→ popis nezapísaný" + removed)
+                        self.log_line.emit(
+                            f"⚠ {os.path.basename(path)}: istota "
+                            f"{result.confidence * 100:.0f} % je pod prahom "
+                            f"{self.min_confidence * 100:.0f} % → popis "
+                            f"nezapísaný. Najlepší tip: "
+                            f"‘{result.best_description}’")
+                        low += 1
+                    else:
+                        # popis + prípadné ďalšie (nahrávka s viac zvukmi)
+                        text_out = " + ".join(
+                            [result.best_description]
+                            + [d for d, _ in result.additional])
+                        conf = (result.confidence
+                                if self.include_score else None)
+                        tag_msg = write_metadata(path, text_out, conf)
+                        top3 = "; ".join(f"{d} ({p * 100:.0f} %)"
+                                         for d, p in result.ranking[:3])
+                        notes = []
+                        if result.name_boosted:
+                            notes.append("názov podporil")
+                        if result.pattern_boosted:
+                            notes.append("🧠 podobný naučenému zvuku")
+                        if result.additional:
+                            notes.append("viac zvukov: " + ", ".join(
+                                f"{d} ({p * 100:.0f} %)"
+                                for d, p in result.additional))
+                        detail = (f"istota {result.confidence * 100:.0f} % | "
+                                  f"náskok +{result.margin * 100:.0f} % | "
+                                  f"{result.segments_used}× okno · 1 dekód · "
+                                  f"dekód {result.decode_time:.1f} s / GPU "
+                                  f"{result.infer_time:.1f} s"
+                                  + (" | " + " · ".join(notes) if notes else "")
+                                  + f" | {tag_msg}")
+                        self.row_status.emit(i, ST_DONE, text_out, detail)
+                        self.log_line.emit(
+                            f"✔ {os.path.basename(path)} → ‘{text_out}’ "
+                            f"({result.confidence * 100:.0f} %, náskok "
+                            f"+{result.margin * 100:.0f} %) | {top3}")
+                        ok += 1
+
+                        # učenie: slová z názvu + zvukový vzor
+                        # (vzor len pre jednopopisové výsledky – zamiešané
+                        #  nahrávky by sa učili ako čisté vzory navyše)
+                        try:
+                            for w in learn_words(
+                                    path, result.best_description,
+                                    self.descriptions, learned):
+                                self.log_line.emit(
+                                    f"🧠 Naučené spojenie: ‘{w}’ → "
+                                    f"‘{result.best_description}’")
+                            if (not result.additional
+                                    and result.audio_embedding is not None):
+                                add_pattern(patterns,
+                                            result.audio_embedding,
+                                            result.best_description)
+                                patterns_changed = True
+                        except Exception:
+                            pass
             except Exception as exc:
                 err_text = str(exc).strip() or type(exc).__name__
                 self.row_status.emit(i, ST_ERROR, "", err_text)
@@ -456,14 +567,38 @@ class AnalysisWorker(QThread):
 
             self.value.emit(i + 1)
 
-        st = self.analyzer._stats if self.analyzer else {}
-        self.log_line.emit(
-            f"📊 Štatistika: {st.get('decodes', 0)} dekódovaní, "
-            f"{st.get('gpu_calls', 0)} GPU/inferenčných volaní.")
-        if self.analyzer is not None:
-            self.analyzer.close()
+        # --- 4) uložiť naučené + štatistika ---------------------------------
+        try:
+            if learned:
+                save_learned(learned)
+            if patterns_changed:
+                save_patterns(patterns)
+        except Exception:
+            pass
+        if analyzer is not None:
+            st = analyzer._stats
+            self.log_line.emit(
+                f"📊 Štatistika: {st.get('decodes', 0)} dekódovaní, "
+                f"{st.get('gpu_calls', 0)} GPU/inferenčných volaní.")
+            analyzer.close()
 
-        self.finished_batch.emit(ok, err, self._cancelled)
+        self.finished_batch.emit(ok, err, low, names, self._cancelled)
+
+    def _old_is_ours(self, old: str) -> bool:
+        """Vyzerá starý popis, ako keby ho napísala táto appka?
+
+        Kontroluje sa značka istoty alebo zhoda s kandidátnym popisom
+        – cudzie (napr. ručne napísané) popisy sa nemažú.
+        """
+        old = old.strip()
+        if not old:
+            return False
+        if "(istota" in old:
+            return True
+        core_old = old.split("(istota")[0].strip().lower()
+        return any(core_old == d.lower() or core_old in d.lower()
+                   or d.lower() in core_old
+                   for d in self.descriptions)
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +632,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_actions()
+        self.refresh_learned_count()
         self.log("Aplikácia spustená. Pridajte súbory (tlačidlom alebo presunte myšou) "
                  "a definujte zoznam popisov vpravo.")
 
@@ -631,6 +767,39 @@ class MainWindow(QMainWindow):
         seg_row.addWidget(self.spin_segments)
         seg_row.addStretch(1)
         right.addLayout(seg_row)
+
+        conf_row = QHBoxLayout()
+        conf_lbl = QLabel("Nezapisovať popis pod istotu:")
+        self.spin_minconf = QSpinBox()
+        self.spin_minconf.setRange(0, 95)
+        self.spin_minconf.setValue(50)
+        self.spin_minconf.setSuffix(" %")
+        self.spin_minconf.setToolTip(
+            "Ak istota priradenia klesne pod túto hranicu, popis sa do\n"
+            "vlastností súboru NEzapíše (radšej nič ako nezmysel)\n"
+            "a starý nízko istotný popis (ak ho napísala appka) sa zmaže.\n"
+            "0 % = zapisovať vždy.")
+        conf_row.addWidget(conf_lbl)
+        conf_row.addWidget(self.spin_minconf)
+        conf_row.addStretch(1)
+        right.addLayout(conf_row)
+
+        self.chk_name_skip = QCheckBox(
+            "⚡ Preskočiť AI, ak názov súboru jednoznačne určuje popis")
+        self.chk_name_skip.setChecked(True)
+        self.chk_name_skip.setToolTip(
+            "Ak aspoň 2 slová z názvu súboru (alebo 1 dlhé slovo) sedia\n"
+            "na práve jeden kandidátny popis – alebo si program zapamätal\n"
+            "spojenie z predošlých behov – popis sa zapíše podľa názvu\n"
+            "a drahá AI analýza sa preskočí (rýchlejšie spracovanie).")
+        right.addWidget(self.chk_name_skip)
+
+        self.btn_learned = QPushButton("🧠 Naučené (0 slov, 0 zvukov)")
+        self.btn_learned.setToolTip(
+            "Čo si program zapamätal: slová z názvov súborov → popisy,\n"
+            "a zvukové vzory (frekvenčné odtlačky) istých výsledkov.\n"
+            "Kliknutím zobrazíte prehľad a môžete naučené zmazať.")
+        right.addWidget(self.btn_learned)
 
         # ==== spodná časť: log ====
         self.log_view = QPlainTextEdit()
@@ -841,10 +1010,13 @@ class MainWindow(QMainWindow):
 
         self.log(f"Analýza: {self.spin_segments.value()}× okno/súbor, "
                  f"{len(descs)} popisov.")
-        self.worker = AnalysisWorker(self.file_paths, descs,
-                                     self.chk_score.isChecked(),
-                                     segments=self.spin_segments.value(),
-                                     analyzer=self.analyzer)
+        self.worker = AnalysisWorker(
+            self.file_paths, descs,
+            self.chk_score.isChecked(),
+            segments=self.spin_segments.value(),
+            analyzer=self.analyzer,
+            min_confidence=self.spin_minconf.value() / 100.0,
+            skip_by_name=self.chk_name_skip.isChecked())
         self.worker.row_status.connect(self.on_row_status)
         self.worker.value.connect(self.on_progress_value)
         self.worker.log_line.connect(self.log)
@@ -918,7 +1090,8 @@ class MainWindow(QMainWindow):
             else "color: #e08a00; font-weight: bold;")
         self.log(f"⚙ {info}")
 
-    def on_finished(self, ok: int, err: int, cancelled: bool) -> None:
+    def on_finished(self, ok: int, err: int, low: int, names: int,
+                    cancelled: bool) -> None:
         self._set_busy(False)
         self.progress.setRange(0, 1)
         self.progress.setFormat("")
@@ -929,11 +1102,89 @@ class MainWindow(QMainWindow):
             self.worker.deleteLater()
             self.worker = None
 
-        msg = (f"Dokončené: ✔ {ok} hotovo, ✖ {err} chýb")
+        msg = (f"Dokončené: ✔ {ok} hotovo, ⚡ {names} podľa názvu, "
+               f"⚠ {low} s nízkou istotou, ✖ {err} chýb")
         if cancelled:
             msg += " (beh bol zrušený – zvyšok preskočený)"
         self.log(msg)
+        self.refresh_learned_count()
         QMessageBox.information(self, "Analýza dokončená", msg + ".")
+
+    # --- čo sa program naučil (slová z názvov + zvukové vzory) -----------------
+    def refresh_learned_count(self) -> None:
+        try:
+            n_words = len(load_learned())
+            n_sounds = len(set(load_patterns().get("label", [])))
+        except Exception:
+            n_words = n_sounds = 0
+        self.btn_learned.setText(
+            f"🧠 Naučené ({n_words} slov, {n_sounds} zvukov)")
+
+    def show_learned(self) -> None:
+        """Prehľad naučeného + možnosť zmazať."""
+        from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QLabel,
+                                     QListWidget, QVBoxLayout)
+        learned = load_learned()
+        patterns = load_patterns()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Čo sa program naučil")
+        dlg.resize(580, 420)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            "🧠 slovo z názvu súboru → popis, ku ktorému vždy viedlo (počet)\n"
+            "🔊 zvukový vzor = zapamätaný frekvenčný odtlačok istého výsledku\n"
+            "Vybrané riadky zmazaním sa prestanú používať."))
+        lst = QListWidget()
+        lst.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        def reload() -> None:
+            lst.clear()
+            for w in sorted(learned):
+                for d, n in sorted(learned[w].items(), key=lambda kv: -kv[1]):
+                    lst.addItem(f"🧠 slovo ‘{w}’ → ‘{d}’ ({n}×)")
+            for d in sorted(set(patterns.get("label", []))):
+                n = patterns["label"].count(d)
+                lst.addItem(f"🔊 zvuk ‘{d}’ ({n} vzorov)")
+            self.refresh_learned_count()
+
+        reload()
+        lay.addWidget(lst, stretch=1)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        b_del = btns.addButton("Zmazať vybrané",
+                               QDialogButtonBox.ButtonRole.DestructiveRole)
+        b_all = btns.addButton("Zmazať všetko",
+                               QDialogButtonBox.ButtonRole.DestructiveRole)
+        lay.addWidget(btns)
+        btns.rejected.connect(dlg.reject)
+
+        def del_selected() -> None:
+            for item in lst.selectedItems():
+                t = item.text()
+                key = t.split("‘")[1]
+                if t.startswith("🧠"):
+                    learned.pop(key, None)
+                else:
+                    keep = [i for i, l in enumerate(patterns.get("label", []))
+                            if l != key]
+                    patterns["emb"] = patterns["emb"][keep]
+                    patterns["label"] = [patterns["label"][i] for i in keep]
+            save_learned(learned)
+            save_patterns(patterns)
+            reload()
+
+        def del_all() -> None:
+            learned.clear()
+            patterns["emb"] = patterns.get("emb")[:0] if patterns.get(
+                "emb") is not None else patterns["emb"]
+            patterns["label"] = []
+            save_learned(learned)
+            save_patterns(patterns)
+            reload()
+
+        b_del.clicked.connect(del_selected)
+        b_all.clicked.connect(del_all)
+        dlg.exec()
 
     # --- prehrávanie (kontrola zvuk ↔ priradený popis) ------------------------
     @staticmethod
@@ -1084,6 +1335,7 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_analysis)
         self.btn_cancel.clicked.connect(self.cancel_analysis)
         self.cmb_presets.currentIndexChanged.connect(self.on_preset_changed)
+        self.btn_learned.clicked.connect(self.show_learned)
         self.table.itemDoubleClicked.connect(self.on_table_double_clicked)
 
         # Klávesové skratky prehrávania – aktívne LEN, keď je kurzor

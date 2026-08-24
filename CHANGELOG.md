@@ -5,6 +5,77 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.6.0] – 2026-08-24 – Názvy súborov, učenie sa, viac popisov, prahy istoty
+
+Požiadavky používateľa: názov súboru má pomáhať pri určovaní istoty;
+nízko istotné popisy nezapisovať a staré zmazať; AI preskočiť, keď názov
+jasne určuje popis; súbory vyhodnocovať paralelne (so testom výkonu);
+program sa má „učiť" nové kategórie z názvov aj z frekvenčných vzorov;
+dlhšie nahrávky s viacerými zvukmi majú dostať viac popisov; učiť sa
+iba anglické slová.
+
+### Pridané
+- **Názov súboru posilní istotu × 1,3** (60 % → 78 %, 70 % → 91 %; strop
+  99 %). Násobenie namiesto „+30 %" zvolené zámerne – istota nikdy
+  nepresiahne 100 % a silné výsledky posilní viac. Funguje aj cez
+  naučené spojenia (napr. „whoas" → whoosh popis).
+- **Zvukový vzor posilní istotu × 1,2**: embedding zvuku (= frekvenčný
+  odtlačok) sa porovná s naučenými vzormi; podobnosť ≥ 80 % = dôkaz.
+- **Preskočenie AI podľa názvu**: ak ≥ 2 slová z názvu (alebo 1 dlhé
+  slovo ≥ 5 znakov, alebo naučené spojenie videné 2×) jednoznačne sedia
+  na práve JEDEN kandidátny popis, popis sa zapíše bez AI. Pri remíze
+  AI beží (radšej spoľahlivo). Ak sa všetky súbory vyriešia názvom,
+  model sa vôbec nespúšťa (uveďte: „⚡ Podľa názvov netreba AI").
+- **Učenie sa slov** (`naucene_spojenia.json`): slovo z názvu → popis,
+  kam súbor skončil; len isté výsledky (nad prahom zápisu); slová už
+  obsiahnuté v popisoch sa neučia (nič nové by to nedali); max 3 popisy
+  na slovo. Iba ASCII/anglické slová – slová s diakritikou sa ignorujú.
+- **Učenie sa zvukových vzorov** (`naucene_vzory.npz`): embedding +
+  popis každého istého výsledku; max 30 vzorov na popis; nahrávky s
+  viacerými popismi sa ako vzor neukladajú (nečistý vzor).
+- **Viac popisov pre dlhšie nahrávky**: popis sa pridá, ak vyhrá aspoň
+  v jednom 10 s okne a jeho priemerná pravdepodobnosť má ≥ 40 % víťaza
+  (výrazne prítomný zvuk, nie náhoda). Max 3 popisy, zápis „a + b".
+- **Dialóg 🧠 Naučené** – prehľad spojení a vzorov + mazanie
+  (vybraných / všetkých). Počet vidno na tlačidle.
+- Nový stav riadku **„Nízka istota"** (oranžová) + rozpis v záverečnej
+  správe (✔ hotovo, ⚡ podľa názvu, ⚠ nízka istota, ✖ chyby).
+- Widgety: „Nezapisovať popis pod istotu [50 %]" a „⚡ Preskočiť AI…".
+
+### Zmenené
+- **Prah istoty (východiskovo 50 %)**: pod ním sa popis NEzapíše
+  („radšej nič ako nezmysel"). Starý popis sa pritom zmaže, ale LEN ak
+  vyzerá, že ho napísala táto appka (obsahuje „(istota" alebo sedí na
+  kandidátny popis) – ručne napísané/cudzie popisy ostanú nedotknuté.
+- Worker: preload(N+1) pred analyzou N (skutočné prekrytie CPU/GPU),
+  2 dekódovacie vlákna, hĺbka prefetchu 3 (paralelné dekódovanie).
+- `AnalysisResult`: nové polia `name_boosted`, `pattern_boosted`,
+  `additional`, `audio_embedding`.
+
+### Testy (sandbox, CPU)
+- Jednotkové: kľúčové slová (diakritika/stoplisty), skip pravidlá a
+  remízy, učenie slov, vzory (podobný zvuk 0,90 ✓ / cudzí 0,03 ✓),
+  zápis/mazanie popisu WAV, matematika boostov.
+- analyze_file na syntetických embeddingoch: zmiešaná nahrávka → 2
+  popisy ✓; čistá → 1 popis ✓; boosty ×1,3/×1,2 ✓.
+- Worker e2e (so stub modelom): skip podľa názvu ✓, 30 % → nezapísané
+  + starý 20 % popis zmazaný ✓, učenie slov aj vzorov ✓, druhý beh:
+  nový súbor „sirenka3" preskočil AI podľa naučeného spojenia ✓.
+- Výkon: MP3 dekód prvého súboru 1,7 s (jednorazový warmup), ďalšie
+  ~60 ms; paralelné dekódovanie 1,0–1,1× na rýchlom stroji – hlavné
+  zrýchlenia plynú z 1 dekódu/súbor (0.4.0), preskakovania AI a warmupu
+  bežiaceho popri GPU.
+
+### Zamietnuté nápady
+- **Slovenské slová bez diakritiky** („zvonenie") – od anglických sa
+  nerozoznávajú bez slovníka; filtruje sa diakritika + stoplist,
+  používateľ potvrdil výhradne anglické názvy súborov.
+- **Rozpoznávanie reči** (vyslovené slová v nahrávke) – samostatná
+  veľká funkcia (iný model, ~1 GB); „viac slov v nahrávke" riešime
+  viacpopisovým pravidlom vyššie.
+
+---
+
 ## [0.5.1] – 2026-08-24 – Oprava: AKTUALIZUJ.bat bez gitu
 
 Hlásenie používateľa: „'git' is not recognized as an internal or external
