@@ -5,6 +5,48 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.7.0] – 2026-08-25 – Rust verzia: CLI alternatíva s preukázanou paritou
+
+Prečo: používateľ si prial vyskúšať **alternatívnu testovaciu verziu v Ruste**
+(rýchlejšie, jeden spustiteľný súbor bez Pythonu). Python verzia sa
+**meníť nemá** – obe existujú vedľa seba a dávajú rovnaké výsledky.
+
+### Pridané
+- **`rust/` – kompletný port v Ruste** (CLI, zatiaľ bez GUI):
+  `analyzator-rs PRIECINOK [--popisy SÚBOR] [--segments N] [--min-istota P]
+  [--model-dir ADRESÁR] [--bez-preskocenia] [--istota-do-popisu] [--vlakien N]`.
+  Rovnaký CLAP model (ONNX export z Pythonu, DirectML ak je k dispozícii),
+  rovnaké konštanty, rovnaký formát metadát (ID3v2.4 COMM / DESCRIPTION / ICMT),
+  rovnaké prirodzené triedenie súborov. Závislosti: ort 2.0-rc, symphonia
+  (dekód wav/mp3/flac/ogg), rustfft, tokenizers, rayon.
+- **Numerická parita preukázaná** proti Pythonu (transformers 5.15.1,
+  onnxruntime 1.29, CPU): log-mel spektrogram **max rozdiel 0,0000 dB**
+  (korelácia 1,00000000); embeddingy okien kosínus 1,0; pravdepodobnosti
+  sa líšia max o **6,7e-07** (úroveň presnosti float32); istoty aj boosty
+  (názov / naučený vzor / viac popisov) sa zhodujú na 0,00e+00.
+  Prečo je to možné: mel filterbank nie je počítaný vzorcom, ale
+  **zapracovaný bajtovo presne z Pythonu** (`src/mel_slaney.f32`, 513×64).
+  Zistili sme pritom, že transformers 5.x pre tento model používa
+  `truncation="rand_trunc"` + **Slaney** banku (nie „fusion“ + HTK ako
+  v starších verziách) – Rust zrkadlí skutočné správanie 5.x.
+- **Naučené dáta kompatibilné OBOJSTRANNE**: `naucene_spojenia.json` a
+  `naucene_vzory.npz` píše/číta Rust aj Python vo formáte numpy `<U…`
+  (UTF-32LE znaky doplnené nulami, bez dĺžkovej predpony) – overené
+  zápismi v oboch smeroch a načítaním v druhej verzii. Pozor: Rust CLI
+  hľadá naučené dáta v aktuálnom adresári (CWD), Python pri skripte.
+- **Ladiace prepínače** (pre overenie parity, bežne sa nepoužívajú):
+  `--dump-mel SÚBOR`, `--dump-emb SÚBOR`, `--json SÚBOR` (celé poradie
+  vrátane pravdepodobností), `--debug-audio` (RMS vzoriek po dekóde).
+- **Rýchlosť (sandbox, CPU, 4×60 s + 8 s súbory)**: Python 5,26 s →
+  Rust 3,1 s (1 vlákno) / 2,7 s (4 vlákna) ≈ **1,7–1,9× rýchlejšie**.
+  Nástroj hashuje/dekóduje paralelne (rayon); inference beží v ONNX
+  Runtime rovnako ako v Pythone, takže s GPU (DirectML) sa zrýchli
+  u oboch a náskok Rustu zostáva hlavne v dekóde a mel spektrograme.
+
+### Zmenené
+- `rust/` má vlastný `.gitignore` (target/ – 38 MB binárka sa do repa
+  neposúva; zostavuje sa príkazom `cargo build --release`).
+
 ## [0.6.0] – 2026-08-24 – Názvy súborov, učenie sa, viac popisov, prahy istoty
 
 Požiadavky používateľa: názov súboru má pomáhať pri určovaní istoty;
