@@ -24,8 +24,4 @@ analyzator-rs PRIECINOK [prepínače]
   --istota-do-popisu     zápis „(istota NN %)" do metadát
   --vlakien N            počet vlákien dekódu (predvolene 4)
 ```
-Naučené súbory (`naucene_spojenia.json`, `naucene_vzory.npz`) sa hľadajú
-v adresári, z ktorého je program spustený – formát je spoločný s Python
-verziou (dajú sa vymieňať).
-
 Ladenie parity: `--dump-mel`, `--dump-emb`, `--json`, `--debug-audio`.

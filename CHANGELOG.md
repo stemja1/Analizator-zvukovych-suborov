@@ -5,6 +5,39 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.8.0] – 2026-08-28 – Odstránené učenie sa (slová aj zvukové vzory)
+
+Prečo: používateľ hodnotil výsledky učenia ako nezmyselné – funkcia
+spájala náhodné slová z názvov súborov s popismi a tým skresľovala
+istotu. Rozhodol sa ju odstrániť celú (slová aj zvukové vzory).
+Zamietnutá alternatíva: prísnejšie filtre učenia (napr. vyšší počet
+opakovaní) – zamietnuté, používateľ chce jednoduché a predvídateľné
+správanie bez skrytých asociácií.
+
+### Odstránené (Python aj Rust – verzie zostávajú rovnocenné)
+- **Učenie slov z názvov** (`naucene_spojenia.json`) – slovo → popis
+  sa už nepamätá ani nepoužíva; tlačidlo 🧠 Naučené a jeho dialóg
+  z GUI boli odstránené.
+- **Zvukové vzory** (`naucene_vzory.npz`) – frekvenčné odtlačky sa
+  už neukladajú ani neporovnávaťajú; zmizla poznámka
+  „🧠 podobný naučenému zvuku“.
+- Staré súbory `naucene_*` na disku zostávajú len ležať – program
+  ich ignoruje (možno zmazať).
+- Súvisiace konštanty z oboch verzií preč (AUDIO_SIM_MIN/BOOST,
+  PATTERN_MAX_PER_LABEL).
+
+### Zachované (neovplyvnené odstránením)
+- **Posilnenie názvom súboru** (× 1,3, strop 99 %) – naďalej funguje,
+  ale IBA pri priamej zhode slova z názvu v texte popisu
+  („rain“ v „heavy rain on roof“); žiadne naučené asociácie.
+- **Preskočenie AI pri jednoznačnom názve** – len priama zhoda
+  (≥ 2 slová alebo 1 dlhé slovo ≥ 5 znakov na jediný popis).
+- Overené testmi: priame zhody fungujú, všeobecné slová (final, mix)
+  nič nespúšťajú. Syntax oboch súborov Pythonu OK; Rust build bez
+  varovaní + funkčný test s modelom (žiadne naucene_* súbory).
+- Windows balík prebalený (v0.8.0) – exe bez učenia, README-RUST
+  aktualizované.
+
 ## [0.7.3] – 2026-08-28 – Oprava TEST-RUST.bat (model sa nenašiel)
 
 Prečo: bat hľadal AI model v adresári spúšťača, ale keď bol priečinok

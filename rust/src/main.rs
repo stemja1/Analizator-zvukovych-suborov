@@ -8,7 +8,6 @@
 
 mod audio;
 mod feat;
-mod learned;
 mod model;
 mod names;
 mod tags;
@@ -20,8 +19,6 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-const AUDIO_SIM_MIN: f64 = 0.80;
-const AUDIO_SIM_BOOST: f64 = 1.2;
 const MULTI_RATIO: f64 = 0.4;
 const MULTI_EXTRA_MAX: usize = 2;
 
@@ -181,6 +178,51 @@ fn basename(p: &Path) -> String {
     p.file_name().and_then(|x| x.to_str()).unwrap_or("?").to_string()
 }
 
+/// npy hlavička (používa --dump-emb na ladiaci výstup).
+fn npy_header(descr: &str, shape: &[usize]) -> Vec<u8> {
+    let shape_str = shape
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let shape_str = if shape.len() == 1 {
+        format!("({},)", shape_str)
+    } else {
+        format!("({})", shape_str)
+    };
+    let dict = format!(
+        "{{'descr': '{}', 'fortran_order': False, 'shape': {}, }}",
+        descr, shape_str
+    );
+    let mut head = Vec::new();
+    head.extend_from_slice(b"\x93NUMPY");
+    head.extend_from_slice(&[1u8, 0]);
+    let unpadded_len = 10 + dict.len() + 1;
+    let total_len = (unpadded_len + 63) / 64 * 64;
+    head.extend_from_slice(&((total_len - 10) as u16).to_le_bytes());
+    head.extend_from_slice(dict.as_bytes());
+    while head.len() < total_len {
+        head.push(b' ');
+    }
+    head[total_len - 1] = b'\n';
+    head
+}
+
+/// Zapíše (shape, f32 dáta) ako npz (zip s data.npy) – ladiaci --dump-emb.
+fn write_npy_flat(path: &std::path::Path, shape: &[usize], data: &[f32]) -> anyhow::Result<()> {
+    use std::io::Write;
+    let f = std::fs::File::create(path)?;
+    let mut w = zip::ZipWriter::new(f);
+    let opts: zip::write::SimpleFileOptions = Default::default();
+    w.start_file("data.npy", opts)?;
+    w.write_all(&npy_header("<f4", shape))?;
+    for v in data {
+        w.write_all(&v.to_le_bytes())?;
+    }
+    w.finish()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let t_start = Instant::now();
     let opts = parse_args()?;
@@ -196,10 +238,6 @@ fn main() -> Result<()> {
     println!("Súborov: {} | popisov: {} | okná: {} | prah istoty: {:.0} %",
              files.len(), descriptions.len(), opts.segments, opts.min_istota * 100.0);
 
-    let words_path = std::env::current_dir()?.join("naucene_spojenia.json");
-    let pats_path = std::env::current_dir()?.join("naucene_vzory.npz");
-    let mut words = learned::load_words(&words_path);
-    let mut patterns = learned::Patterns::load(&pats_path);
 
     // --- 1) jednoznačné názvy → preskoč AI --------------------------------
     let mut name_skips: Vec<Option<String>> = vec![None; files.len()];
@@ -207,7 +245,7 @@ fn main() -> Result<()> {
     if opts.skip_by_name {
         for (i, f) in files.iter().enumerate() {
             if let Some(p) = f.to_str() {
-                if let Some(d) = names::name_skip_description(p, &descriptions, &words) {
+                if let Some(d) = names::name_skip_description(p, &descriptions) {
                     name_skips[i] = Some(d);
                 }
             }
@@ -314,7 +352,6 @@ fn main() -> Result<()> {
     let mut names_cnt = 0u32;
     let mut err = 0u32;
     let mut infer_ms_sum = 0u128;
-    let mut patterns_changed = false;
     let mut feats_by_idx: std::collections::HashMap<usize, Vec<Vec<f32>>> =
         prepared.into_iter().filter_map(|r| r.ok()).collect();
 
@@ -327,9 +364,6 @@ fn main() -> Result<()> {
                 Ok(_) => {
                     println!("⚡ {name} → ‘{desc}’ (názov jednoznačne sedí)");
                     names_cnt += 1;
-                    for w in learned::learn_words(p, desc, &descriptions, &mut words) {
-                        println!("🧠 Naučené spojenie: ‘{w}’ → ‘{desc}’");
-                    }
                 }
                 Err(e) => {
                     println!("✖ {name}: {e}");
@@ -360,7 +394,7 @@ fn main() -> Result<()> {
         infer_ms_sum += t0.elapsed().as_millis();
         if dump_emb_target.is_some() && json_records.is_empty() {
             let flat: Vec<f32> = window_embs.concat();
-            let _ = learned::write_npy_flat(
+            let _ = write_npy_flat(
                 dump_emb_target.as_ref().unwrap(),
                 &[window_embs.len(), window_embs[0].len()],
                 &flat,
@@ -428,17 +462,9 @@ fn main() -> Result<()> {
         // boosty: názov súboru + naučený zvukový vzor
         let mut conf = probs[best] as f64;
         let mut name_boosted = false;
-        let mut pattern_boosted = false;
-        if names::name_matches_description(p, &descriptions[best], &words) {
+        if names::name_matches_description(p, &descriptions[best]) {
             conf = (conf * names::NAME_BOOST_FACTOR).min(names::NAME_BOOST_CAP);
             name_boosted = true;
-        }
-        {
-            let (lbl, sim) = patterns.find_similar(&audio_emb);
-            if lbl == descriptions[best] && sim as f64 >= AUDIO_SIM_MIN {
-                conf = (conf * AUDIO_SIM_BOOST).min(names::NAME_BOOST_CAP);
-                pattern_boosted = true;
-            }
         }
 
         json_records.push(serde_json::json!({
@@ -447,7 +473,6 @@ fn main() -> Result<()> {
             "p": probs[best] as f64,
             "conf": conf,
             "name_boosted": name_boosted,
-            "pattern_boosted": pattern_boosted,
             "ranking": order.iter()
                 .map(|&i| serde_json::json!([descriptions[i], probs[i] as f64]))
                 .collect::<Vec<_>>(),
@@ -489,7 +514,6 @@ fn main() -> Result<()> {
             Ok(_) => {
                 let mut notes = Vec::new();
                 if name_boosted { notes.push("názov podporil".to_string()); }
-                if pattern_boosted { notes.push("🧠 podobný naučenému zvuku".to_string()); }
                 if !additional.is_empty() {
                     notes.push(format!("viac zvukov: {}", additional.iter()
                         .map(|(d2, mp)| format!("{d2} ({:.0} %)", mp * 100.0))
@@ -498,13 +522,6 @@ fn main() -> Result<()> {
                 let note = if notes.is_empty() { String::new() } else { format!(" | {}", notes.join(" · ")) };
                 println!("✔ {name} → ‘{text_out}’ ({:.0} %){note}", conf * 100.0);
                 ok += 1;
-                for w in learned::learn_words(p, &descriptions[best], &descriptions, &mut words) {
-                    println!("🧠 Naučené spojenie: ‘{w}’ → ‘{}’", descriptions[best]);
-                }
-                if additional.is_empty() {
-                    patterns.add(&audio_emb, &descriptions[best]);
-                    patterns_changed = true;
-                }
             }
             Err(e) => {
                 println!("✖ {name}: {e}");
@@ -513,11 +530,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // --- 5) uložiť naučené + súhrn -------------------------------------------
-    learned::save_words(&words_path, &words);
-    if patterns_changed {
-        patterns.save()?;
-    }
+    // --- 5) súhrn --------------------------------------------------------------
     let total = t_start.elapsed().as_secs_f32();
     println!();
     if let Some(p) = &opts.json_out {

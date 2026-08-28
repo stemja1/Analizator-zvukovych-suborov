@@ -30,10 +30,9 @@ from PyQt6.QtWidgets import (
 )
 
 from core_analyzer import (DEFAULT_SEGMENTS, SUPPORTED_EXTENSIONS, ClapAnalyzer,
-                           add_pattern, learn_words, load_learned,
-                           load_patterns, name_skip_description,
+                           name_skip_description,
                            read_description, remove_description,
-                           save_learned, save_patterns, write_metadata)
+                           write_metadata)
 
 # --- prehrávanie súborov (kontrola zvuk ↔ priradený popis) -------------------
 # QtMultimedia je samostatný súčasť PyQt6; ak chýba, appka beží normálne,
@@ -391,10 +390,9 @@ class AnalysisWorker(QThread):
 
         # --- 1) súbory s jednoznačným názvom – AI sa pri nich preskočí ----
         name_skips: dict[int, str] = {}
-        learned = load_learned()
         if self.skip_by_name:
             for i, p in enumerate(self.files):
-                d = name_skip_description(p, self.descriptions, learned)
+                d = name_skip_description(p, self.descriptions)
                 if d:
                     name_skips[i] = d
         if name_skips:
@@ -402,7 +400,6 @@ class AnalysisWorker(QThread):
                 f"⚡ {len(name_skips)} z {len(self.files)} súborov má "
                 f"jednoznačný názov – pri nich sa AI nepoužije.")
         need_ai = len(self.files) - len(name_skips)
-        patterns = load_patterns()
 
         # --- 2) model sa pripraví LEN ak je čo analyzovať AI ---------------
         analyzer = None
@@ -451,7 +448,6 @@ class AnalysisWorker(QThread):
             self.log_line.emit("⚡ Podľa názvov netreba AI – model sa nespúšťa.")
 
         # --- 3) hlavný cyklus ------------------------------------------------
-        patterns_changed = False
         for i, path in enumerate(self.files):
             if self._cancelled:
                 self.row_status.emit(i, ST_SKIPPED, "", "")
@@ -470,13 +466,6 @@ class AnalysisWorker(QThread):
                         f"⚡ {os.path.basename(path)} → ‘{desc}’ "
                         f"(názov jednoznačne sedí)")
                     names += 1
-                    try:
-                        for w in learn_words(path, desc,
-                                             self.descriptions, learned):
-                            self.log_line.emit(
-                                f"🧠 Naučené spojenie: ‘{w}’ → ‘{desc}’")
-                    except Exception:
-                        pass
                 else:
                     # (b) AI analýza (s predstihovým dekódovaním ďalšieho)
                     if analyzer is not None:
@@ -486,8 +475,7 @@ class AnalysisWorker(QThread):
                         if nxt < len(self.files):
                             analyzer.preload(self.files[nxt], self.segments)
                         result = analyzer.analyze_file(
-                            path, self.descriptions, segments=self.segments,
-                            learned=learned, patterns=patterns)
+                            path, self.descriptions, segments=self.segments)
 
                     if result.confidence < self.min_confidence:
                         # nízká istota → popis NEzapísať, starý zmazať
@@ -521,8 +509,6 @@ class AnalysisWorker(QThread):
                         notes = []
                         if result.name_boosted:
                             notes.append("názov podporil")
-                        if result.pattern_boosted:
-                            notes.append("🧠 podobný naučenému zvuku")
                         if result.additional:
                             notes.append("viac zvukov: " + ", ".join(
                                 f"{d} ({p * 100:.0f} %)"
@@ -540,25 +526,6 @@ class AnalysisWorker(QThread):
                             f"({result.confidence * 100:.0f} %, náskok "
                             f"+{result.margin * 100:.0f} %) | {top3}")
                         ok += 1
-
-                        # učenie: slová z názvu + zvukový vzor
-                        # (vzor len pre jednopopisové výsledky – zamiešané
-                        #  nahrávky by sa učili ako čisté vzory navyše)
-                        try:
-                            for w in learn_words(
-                                    path, result.best_description,
-                                    self.descriptions, learned):
-                                self.log_line.emit(
-                                    f"🧠 Naučené spojenie: ‘{w}’ → "
-                                    f"‘{result.best_description}’")
-                            if (not result.additional
-                                    and result.audio_embedding is not None):
-                                add_pattern(patterns,
-                                            result.audio_embedding,
-                                            result.best_description)
-                                patterns_changed = True
-                        except Exception:
-                            pass
             except Exception as exc:
                 err_text = str(exc).strip() or type(exc).__name__
                 self.row_status.emit(i, ST_ERROR, "", err_text)
@@ -567,14 +534,7 @@ class AnalysisWorker(QThread):
 
             self.value.emit(i + 1)
 
-        # --- 4) uložiť naučené + štatistika ---------------------------------
-        try:
-            if learned:
-                save_learned(learned)
-            if patterns_changed:
-                save_patterns(patterns)
-        except Exception:
-            pass
+        # --- 4) štatistika ----------------------------------------------------
         if analyzer is not None:
             st = analyzer._stats
             self.log_line.emit(
@@ -632,7 +592,6 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_actions()
-        self.refresh_learned_count()
         self.log("Aplikácia spustená. Pridajte súbory (tlačidlom alebo presunte myšou) "
                  "a definujte zoznam popisov vpravo.")
 
@@ -793,13 +752,6 @@ class MainWindow(QMainWindow):
             "spojenie z predošlých behov – popis sa zapíše podľa názvu\n"
             "a drahá AI analýza sa preskočí (rýchlejšie spracovanie).")
         right.addWidget(self.chk_name_skip)
-
-        self.btn_learned = QPushButton("🧠 Naučené (0 slov, 0 zvukov)")
-        self.btn_learned.setToolTip(
-            "Čo si program zapamätal: slová z názvov súborov → popisy,\n"
-            "a zvukové vzory (frekvenčné odtlačky) istých výsledkov.\n"
-            "Kliknutím zobrazíte prehľad a môžete naučené zmazať.")
-        right.addWidget(self.btn_learned)
 
         # ==== spodná časť: log ====
         self.log_view = QPlainTextEdit()
@@ -1107,84 +1059,7 @@ class MainWindow(QMainWindow):
         if cancelled:
             msg += " (beh bol zrušený – zvyšok preskočený)"
         self.log(msg)
-        self.refresh_learned_count()
         QMessageBox.information(self, "Analýza dokončená", msg + ".")
-
-    # --- čo sa program naučil (slová z názvov + zvukové vzory) -----------------
-    def refresh_learned_count(self) -> None:
-        try:
-            n_words = len(load_learned())
-            n_sounds = len(set(load_patterns().get("label", [])))
-        except Exception:
-            n_words = n_sounds = 0
-        self.btn_learned.setText(
-            f"🧠 Naučené ({n_words} slov, {n_sounds} zvukov)")
-
-    def show_learned(self) -> None:
-        """Prehľad naučeného + možnosť zmazať."""
-        from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QLabel,
-                                     QListWidget, QVBoxLayout)
-        learned = load_learned()
-        patterns = load_patterns()
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Čo sa program naučil")
-        dlg.resize(580, 420)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel(
-            "🧠 slovo z názvu súboru → popis, ku ktorému vždy viedlo (počet)\n"
-            "🔊 zvukový vzor = zapamätaný frekvenčný odtlačok istého výsledku\n"
-            "Vybrané riadky zmazaním sa prestanú používať."))
-        lst = QListWidget()
-        lst.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        def reload() -> None:
-            lst.clear()
-            for w in sorted(learned):
-                for d, n in sorted(learned[w].items(), key=lambda kv: -kv[1]):
-                    lst.addItem(f"🧠 slovo ‘{w}’ → ‘{d}’ ({n}×)")
-            for d in sorted(set(patterns.get("label", []))):
-                n = patterns["label"].count(d)
-                lst.addItem(f"🔊 zvuk ‘{d}’ ({n} vzorov)")
-            self.refresh_learned_count()
-
-        reload()
-        lay.addWidget(lst, stretch=1)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        b_del = btns.addButton("Zmazať vybrané",
-                               QDialogButtonBox.ButtonRole.DestructiveRole)
-        b_all = btns.addButton("Zmazať všetko",
-                               QDialogButtonBox.ButtonRole.DestructiveRole)
-        lay.addWidget(btns)
-        btns.rejected.connect(dlg.reject)
-
-        def del_selected() -> None:
-            for item in lst.selectedItems():
-                t = item.text()
-                key = t.split("‘")[1]
-                if t.startswith("🧠"):
-                    learned.pop(key, None)
-                else:
-                    keep = [i for i, l in enumerate(patterns.get("label", []))
-                            if l != key]
-                    patterns["emb"] = patterns["emb"][keep]
-                    patterns["label"] = [patterns["label"][i] for i in keep]
-            save_learned(learned)
-            save_patterns(patterns)
-            reload()
-
-        def del_all() -> None:
-            learned.clear()
-            patterns["emb"] = patterns.get("emb")[:0] if patterns.get(
-                "emb") is not None else patterns["emb"]
-            patterns["label"] = []
-            save_learned(learned)
-            save_patterns(patterns)
-            reload()
-
-        b_del.clicked.connect(del_selected)
-        b_all.clicked.connect(del_all)
-        dlg.exec()
 
     # --- prehrávanie (kontrola zvuk ↔ priradený popis) ------------------------
     @staticmethod
@@ -1335,7 +1210,6 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_analysis)
         self.btn_cancel.clicked.connect(self.cancel_analysis)
         self.cmb_presets.currentIndexChanged.connect(self.on_preset_changed)
-        self.btn_learned.clicked.connect(self.show_learned)
         self.table.itemDoubleClicked.connect(self.on_table_double_clicked)
 
         # Klávesové skratky prehrávania – aktívne LEN, keď je kurzor

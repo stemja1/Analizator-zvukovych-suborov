@@ -63,11 +63,8 @@ NAME_MIN_WORD_LEN = 4        # kratšie slová sú väčšinou šum (max, ver, c
 NAME_SKIP_MIN_WORD_LEN = 5   # 1 dlhé slovo stačí na preskočenie AI
 NAME_BOOST_FACTOR = 1.3      # istota × 1,3 keď názov podporí víťaza
 NAME_BOOST_CAP = 0.99        # strop – 100 % nikdy neukazujeme
-AUDIO_SIM_MIN = 0.80         # podobnosť zvuku s naučeným vzorom = dôkaz
-AUDIO_SIM_BOOST = 1.2        # istota × 1,2 keď zvuk sedí na naučený vzor
 MULTI_RATIO = 0.4            # 2. popis sa zapíše, ak má ≥ 40 % priemeru víťaza
 MULTI_EXTRA_MAX = 2          # max počet ďalších popisov (spolu max 3)
-PATTERN_MAX_PER_LABEL = 30   # koľko zvukových vzorov si pamätať na popis
 
 # všeobecné slová, ktoré o obsahu nič nehovoria – pri triedení sa ignorujú
 NAME_STOPWORDS = {
@@ -359,16 +356,12 @@ def _read_wav_icmt(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 # Názov súboru ako pomôcka + „učenie“ (slová aj zvukové vzory)
 # ---------------------------------------------------------------------------
-LEARNED_FILE = os.path.join(_HERE, "naucene_spojenia.json")
-PATTERNS_FILE = os.path.join(_HERE, "naucene_vzory.npz")
-
-
 def filename_keywords(file_path: str) -> list[str]:
     """Významové ANGLICKÉ slová z názvu súboru (bez čísel a všeobecných slov).
 
     „whoosh_final_2.wav“ → [„whoosh“]; „dog_barking_03.mp3“ → [„dog“, „barking“]
-    Slová s diakritikou (napr. „zvonenie“, „hodín“) sa IGNORUJÚ – učenie a
-    párovanie s popismi funguje len na anglické názvy súborov (popisy
+    Slová s diakritikou (napr. „zvonenie“, „hodín“) sa IGNORUJÚ – párovanie
+    s popismi funguje len na anglické názvy súborov (popisy
     CLAP modelu sú anglické, slovenské názvy by len znížili presnosť).
     """
     base = os.path.splitext(os.path.basename(file_path))[0].lower()
@@ -392,26 +385,21 @@ def keyword_in_description(keyword: str, description: str) -> bool:
     return False
 
 
-def name_matches_description(file_path: str, description: str,
-                             learned: dict | None = None) -> bool:
-    """Sedí nejaké slovo z názvu na popis (textovo alebo naučene)?"""
+def name_matches_description(file_path: str, description: str) -> bool:
+    """Sedí nejaké slovo z názvu priamo na text popisu?"""
     for k in filename_keywords(file_path):
         if keyword_in_description(k, description):
-            return True
-        assoc = (learned or {}).get(k)
-        if assoc and assoc.get(description, 0) >= 1:
             return True
     return False
 
 
-def name_skip_description(file_path: str, descriptions: list[str],
-                          learned: dict | None = None) -> str | None:
+def name_skip_description(file_path: str,
+                          descriptions: list[str]) -> str | None:
     """Popis, ak NÁZOV súboru jednoznačne určuje práve jeden popis.
 
     Konzervatívne podmienky (AI sa nesmie preskočiť len tak):
     * ≥ 2 slová z názvu sedia na ten istý popis a nikto iný nemá toľko,
-      ALEBO 1 dlhé slovo (≥ 5 znakov) sedí len na jeden popis,
-      ALEBO naučené spojenie: slovo už 2× viedlo k rovnakému popisu.
+      ALEBO 1 dlhé slovo (≥ 5 znakov) sedí len na jeden popis.
     Pri remíze → None (beží AI). Vrátený popis sa zapíše bez AI.
     """
     kws = filename_keywords(file_path)
@@ -427,122 +415,7 @@ def name_skip_description(file_path: str, descriptions: list[str],
             and keyword_in_description(k, descriptions[best_i]) for k in kws)
         if strong:
             return descriptions[best_i]
-    if learned:
-        for k in kws:
-            assoc = learned.get(k)
-            if not assoc:
-                continue
-            tops = [d for d, n in assoc.items() if n >= 2]
-            if len(tops) == 1 and assoc[tops[0]] >= 2 \
-                    and tops[0] in descriptions:
-                return tops[0]
     return None
-
-
-def load_learned() -> dict:
-    """Naučené spojenia slovo → {popis: počet} (naucene_spojenia.json)."""
-    try:
-        with open(LEARNED_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_learned(learned: dict) -> None:
-    try:
-        with open(LEARNED_FILE, "w", encoding="utf-8") as f:
-            json.dump(learned, f, ensure_ascii=False, indent=1)
-    except Exception:
-        pass                                # bez učenia sa beží ďalej
-
-
-def learn_words(file_path: str, description: str,
-                descriptions: list[str],
-                learned: dict | None = None) -> list[str]:
-    """Zapamätá si spojenia slovo z názvu → priradený popis.
-
-    Učí sa len slová, ktoré v žiadnom popise nie sú (inak nič nové
-    nenaučí). Mení `learned` v pamäti; ukladať treba cez save_learned().
-    Vráti zoznam novo zapamätaných slov (na log).
-    """
-    learned_now: list[str] = []
-    learned = learned if learned is not None else load_learned()
-    for k in filename_keywords(file_path):
-        if any(keyword_in_description(k, d) for d in descriptions):
-            continue
-        counts = learned.setdefault(k, {})
-        counts[description] = counts.get(description, 0) + 1
-        if len(counts) > 3:                 # pamäť: max 3 popisy na slovo
-            for d, _ in sorted(counts.items(), key=lambda kv: kv[1])[:-3]:
-                del counts[d]
-        learned_now.append(k)
-    return learned_now
-
-
-def load_patterns() -> dict:
-    """Naučené zvukové vzory: {'emb': (N, D), 'label': [str]}.
-
-    Každý istý výsledok (popis + embedding zvuku) si program pamätá ako
-    „vzor“ – podľa podobnosti zvuku potom vie radšej tipnúť aj súbory
-    s nevravným názvom.
-    """
-    try:
-        z = np.load(PATTERNS_FILE, allow_pickle=False)
-        emb = z["emb"].astype(np.float32)
-        label = [str(x) for x in z["label"]]
-        if emb.ndim == 2 and len(label) == emb.shape[0] and emb.shape[0]:
-            return {"emb": emb, "label": label}
-    except Exception:
-        pass
-    return {"emb": np.zeros((0, 1), np.float32), "label": []}
-
-
-def save_patterns(patterns: dict) -> None:
-    try:
-        emb = np.asarray(patterns.get("emb"), np.float32)
-        if emb.ndim != 2 or emb.shape[0] == 0:
-            return
-        np.savez_compressed(PATTERNS_FILE, emb=emb,
-                            label=np.array(patterns.get("label", [])))
-    except Exception:
-        pass
-
-
-def add_pattern(patterns: dict, embedding: np.ndarray, label: str) -> None:
-    """Pridá zvukový vzor (embedding → popis) do pamäti vzorov."""
-    v = np.asarray(embedding, np.float32).reshape(1, -1)
-    labels = patterns.get("label", [])
-    emb = patterns.get("emb")
-    if not labels or emb is None or emb.shape[0] == 0 \
-            or emb.shape[1] != v.shape[1]:
-        patterns["emb"], patterns["label"] = v, [label]
-        return
-    same = [i for i, l in enumerate(labels) if l == label]
-    if len(same) >= PATTERN_MAX_PER_LABEL:  # zahodiť najstarší vzor popisu
-        drop = same[0]
-        keep = [j for j in range(len(labels)) if j != drop]
-        patterns["emb"] = emb[keep]
-        patterns["label"] = [labels[j] for j in keep]
-    patterns["emb"] = np.vstack([patterns["emb"], v])
-    patterns["label"].append(label)
-
-
-def find_similar_pattern(embedding: np.ndarray,
-                         patterns: dict) -> tuple[str, float]:
-    """Najpodobnejší naučený zvukový vzor → (popis, podobnosť 0..1)."""
-    emb, labels = patterns.get("emb"), patterns.get("label", [])
-    if emb is None or not labels or emb.shape[0] != len(labels) \
-            or emb.shape[0] == 0:
-        return ("", 0.0)
-    v = np.asarray(embedding, np.float32).ravel()
-    if emb.shape[1] != v.shape[0]:
-        return ("", 0.0)
-    norm_e = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-9)
-    v = v / (np.linalg.norm(v) + 1e-9)
-    sims = norm_e @ v
-    i = int(np.argmax(sims))
-    return (labels[i], float(sims[i]))
 
 
 # ---------------------------------------------------------------------------
@@ -660,9 +533,7 @@ class ClapAnalyzer:
     def analyze_file(self, file_path: str,
                      candidate_descriptions: list[str],
                      segments: int = DEFAULT_SEGMENTS,
-                     use_name_hint: bool = True,
-                     learned: dict | None = None,
-                     patterns: dict | None = None) -> AnalysisResult:
+                     use_name_hint: bool = True) -> AnalysisResult:
         """Vráti najlepší popis pre daný zvukový súbor + celé poradie.
 
         Presnosť: súbor sa analyzuje v `segments` rovnomerne rozmiestených
@@ -719,19 +590,13 @@ class ClapAnalyzer:
             additional = [(candidate_descriptions[j], mean_p)
                           for j, mean_p in extra[:MULTI_EXTRA_MAX]]
 
-        # --- istota: posilnenie názvom súboru a naučeným zvukovým vzorom --
+        # --- istota: posilnenie názvom súboru ------------------------------
         conf = float(probs[best])
-        name_boosted = pattern_boosted = False
+        name_boosted = False
         if use_name_hint and name_matches_description(
-                file_path, candidate_descriptions[best], learned):
+                file_path, candidate_descriptions[best]):
             conf = min(NAME_BOOST_CAP, conf * NAME_BOOST_FACTOR)
             name_boosted = True
-        if patterns is not None:
-            sim_label, sim = find_similar_pattern(audio_emb, patterns)
-            if sim_label == candidate_descriptions[best] \
-                    and sim >= AUDIO_SIM_MIN:
-                conf = min(NAME_BOOST_CAP, conf * AUDIO_SIM_BOOST)
-                pattern_boosted = True
 
         return AnalysisResult(
             file_path=file_path,
@@ -743,7 +608,6 @@ class ClapAnalyzer:
             decode_time=decode_time,
             infer_time=infer_time,
             name_boosted=name_boosted,
-            pattern_boosted=pattern_boosted,
             additional=additional,
             audio_embedding=audio_emb,
             backend=self.backend_info,

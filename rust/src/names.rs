@@ -63,20 +63,11 @@ pub fn keyword_in_description(kw: &str, desc: &str) -> bool {
     false
 }
 
-/// Slová z názvu vs. popis (+ naučené spojenia).
-pub fn name_matches_description(
-    path: &str,
-    desc: &str,
-    learned: &serde_json::Map<String, serde_json::Value>,
-) -> bool {
+/// Slová z názvu vs. text popisu (priama zhoda).
+pub fn name_matches_description(path: &str, desc: &str) -> bool {
     for kw in filename_keywords(path) {
         if keyword_in_description(&kw, desc) {
             return true;
-        }
-        if let Some(counts) = learned.get(&kw).and_then(|v| v.as_object()) {
-            if counts.get(desc).and_then(|c| c.as_i64()).unwrap_or(0) >= 1 {
-                return true;
-            }
         }
     }
     false
@@ -86,7 +77,6 @@ pub fn name_matches_description(
 pub fn name_skip_description(
     path: &str,
     descriptions: &[String],
-    learned: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
     let kws = filename_keywords(path);
     if kws.is_empty() {
@@ -109,19 +99,6 @@ pub fn name_skip_description(
                 .any(|k| k.len() >= NAME_SKIP_MIN_WORD_LEN && keyword_in_description(k, &descriptions[best_i]));
         if strong {
             return Some(descriptions[best_i].clone());
-        }
-    }
-    // naučené spojenie: slovo viedlo 2× k rovnakému popisu (jednoznačne)
-    for kw in &kws {
-        if let Some(counts) = learned.get(kw).and_then(|v| v.as_object()) {
-            let tops: Vec<(&String, i64)> = counts
-                .iter()
-                .filter(|(_, c)| c.as_i64().unwrap_or(0) >= 2)
-                .map(|(d, c)| (d, c.as_i64().unwrap_or(0)))
-                .collect();
-            if tops.len() == 1 && descriptions.iter().any(|d| d == tops[0].0) {
-                return Some(tops[0].0.clone());
-            }
         }
     }
     None
