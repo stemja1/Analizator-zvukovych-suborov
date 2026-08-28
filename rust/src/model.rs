@@ -152,13 +152,44 @@ impl ClapModel {
     /// Log-mel črty (N × 1001 × 64) → (N, 512) normalizované embeddingy.
     pub fn embed_audio(&mut self, feats: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
         let n = feats.len();
+        // Rýchla cesta: všetky okná v jednom batchi (graf s dynamickým batch).
+        if n > 1 && !self.audio_fixed_batch() {
+            if let Ok(out) = self.embed_audio_batch(feats) {
+                return Ok(out);
+            }
+            // starší graf môže vyžadovať batch=1 → skúsime po riadkoch
+            eprintln!("[CLAP] graf odmietol batch {n} → okná sa pošlú osobitne");
+        }
+        // Pomalá cesta: jedno okno na volanie (graf s fixným batch = 1).
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut rows = self.embed_audio_batch(&feats[i..i + 1])?;
+            out.push(rows.remove(0));
+        }
+        Ok(out)
+    }
+
+    /// Má audio graf fixne danú 0. dimenziu (batch) = 1?
+    fn audio_fixed_batch(&self) -> bool {
+        self.audio
+            .inputs
+            .first()
+            .map(|i| match &i.input_type {
+                ort::value::ValueType::Tensor { shape, .. } => shape.first() == Some(&1),
+                _ => false,
+            })
+            .unwrap_or(false)
+    }
+
+    fn embed_audio_batch(&mut self, feats: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        let n = feats.len();
         let flat: Vec<f32> = feats.concat();
         let t = Tensor::from_array((vec![n as i64, 1, 1001, 64], flat))?;
         let outputs = self.audio.run(ort::inputs!["input_features" => t])?;
         let (shape, data) = outputs[self.audio_out.as_str()].try_extract_tensor::<f32>()?;
-        let d = *shape.last().unwrap_or(&512) as usize;
+        let d = (*shape.last().unwrap_or(&512)).max(1) as usize;
         let mut out = Vec::with_capacity(n);
-        for row in data.chunks(d.max(1)) {
+        for row in data.chunks(d) {
             out.push(l2norm(row));
         }
         Ok(out)

@@ -1,4 +1,4 @@
-﻿ANALYZÁTOR ZVUKOVÝCH SÚBOROV – RUST TESTOVACIA VERZIA (0.9.1)
+﻿ANALYZÁTOR ZVUKOVÝCH SÚBOROV – RUST TESTOVACIA VERZIA (0.10.0)
 ================================================================
 
 Rýchlejšia alternatívna verzia programu. Dáva ROVNAKÉ výsledky

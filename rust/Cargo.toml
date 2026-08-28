@@ -27,6 +27,7 @@ path = "src/gui.rs"
 
 [dependencies]
 eframe = "0.28"
+egui_extras = "0.28"
 rfd = "0.14"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

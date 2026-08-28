@@ -5,6 +5,47 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.10.0] – 2026-08-28 – Oprava „invalid dimensions“ + prepracovaný dizajn okna
+
+Prečo: (1) pri dlhších súboroch Rust GUI/CLI padlo chybou
+„got invalid dimensions for input“ – staršie exporty audio grafu
+majú fixný batch = 1, kým Rust poslal všetky okná naraz (Python to
+rieši fallbackom, Rust nemal); (2) používateľ hodnotil okno ako
+škaredé a prial lepší dizajn/UX podľa overených postupov.
+
+### Opravené
+- **embed_audio**: ak graf hlási fixnú 0. dimenziu = 1 (zistí sa
+  priamo z vstupov session) alebo batch volanie zlyhá, okná sa
+  odošlú po jednom – rovnaké správanie ako Python fallback.
+  Overené testom s umelo vytvoreným fixným batch=1 grafom
+  (45 s súbor → 4 okná ✔) aj dynamickým grafom (✔).
+
+### Zmenené – redesign GUI (podľa zistení z rešerše knižníc
+egui-elegance / egui-thematic: jednotná paleta, akcent, zaoblenie,
+konzistentné odsadenia, sémantické farby)
+- **Tmavá „slate“ paleta s modrým akcentom**, zaoblené prvky (6–10 px),
+  jednotné odsadenia; panely majú jemne odlišný podklad ako tabuľka.
+- **Profesionálna tabuľka** (egui_extras): stĺpce SÚBOR / POPIS /
+  ISTOTA s hlavičkou, pruhovaním, zmenou šírky myšou, orezaním
+  dlhých textov + tooltip s detailom; istota vfarbená podľa stavu.
+- **Stavové bodky** ● zelená/oranžová/červená/modrá/šedá namiesto
+  znakov; dvojriadkové riadky s poznámkou (napr. dôvod nízkej istoty).
+- **Hlavné tlačidlo** „▶ Analyzovať (N)“ veľké zelené; červené
+  „■ Zastaviť“ počas behu; progress bar s počtom a **odhadom
+  zostávajúceho času**; skratka Ctrl+Enter.
+- **Prázdny stav**: veľká nápoveda „Potiahnite sem priečinok…“ namiesto
+  prázdnej tabuľky; **modré zvýraznenie celého okna počas
+  pretiahnutia** súborov („↧ Pusťte súbory alebo priečinok sem“).
+- **Hlavička okna**: titulok + riadok s cestou, „📂 Vybrať priečinok…“,
+  „Načítať ▸“, „✕ Zoznam“ na vymazanie zoznamu.
+- **Pravý panel** prehľadne rozdelený do sekcií (Popisy / Nastavenia
+  analýzy / Výkon) so skracovaním; každé nastavenie má vysvetľujúci
+  tooltip; stav AI modelu s bodkou dole.
+- **Log** zbaliteľný, automaticky rolujúci na koniec.
+- Zamietnuté: externé „elegantné“ widget knižnice (egui-elegance /
+  egui_styled) – priniesli by ďalšie závislosti do balíka; použili
+  sme vlastnú paletu v štýle ich odporúčaní.
+
 ## [0.9.1] – 2026-08-28 – Automatické využitie všetkých jadier procesora
 
 Prečo: program mal počet vlákien dekódovania pevne nastavený na 4,

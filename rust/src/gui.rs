@@ -1,21 +1,78 @@
 //! Analyzátor zvukových súborov – Rust verzia, GRAFICKÉ OKNO.
 //! Rovnaká logika ako CLI (analyzator-rs), len s oknom ako Python GUI.
 //!
+//! Dizajn: jednotná tmavá paleta s akcentom, zaoblené prvky, prehľadná
+//! tabuľka (egui_extras), sémantické farby stavov, veľké hlavné
+//! tlačidlo, nápoveda pri prázdnom zozname a zvýraznenie pri
+//! pretiahnutí súborov.
+//!
 //! Spustenie: dvojklik na analyzator-gui(.exe).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // bez čierneho okna
 
 use eframe::egui;
+use eframe::egui::{Align2, Color32, FontId, Rounding, Stroke};
+use egui_extras::{Column, TableBuilder};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::time::Instant;
 
 use analyzator_rs::pipeline::{self, Event, RunOptions};
 use analyzator_rs::{basename, is_audio_file, parse_descriptions, scan_audio, sort_natural};
 
 /// Predvolených 69 popisov – rovnakých ako Python GUI.
 const DEFAULT_POPISY: &str = include_str!("popisy_default.txt");
+
+// ---- farebná paleta (tmavá „slate“ s modrým akcentom) -----------------------
+mod pal {
+    use eframe::egui::Color32;
+    pub const BG: Color32 = Color32::from_rgb(0x16, 0x18, 0x1D); // panely
+    pub const BG2: Color32 = Color32::from_rgb(0x1A, 0x1D, 0x23); // panely (sekc.)
+    pub const INPUT: Color32 = Color32::from_rgb(0x0F, 0x11, 0x14); // vstupy
+    pub const STRIPE: Color32 = Color32::from_rgb(0x1F, 0x23, 0x2A); // ryhy tabuľky
+    pub const ACCENT: Color32 = Color32::from_rgb(0x53, 0xA8, 0xFF); // akcent
+    pub const GO: Color32 = Color32::from_rgb(0x2F, 0xA4, 0x6A); // hlavné tlačidlo
+    pub const STOP: Color32 = Color32::from_rgb(0xB0, 0x3A, 0x3A);
+    pub const OK: Color32 = Color32::from_rgb(0x57, 0xC7, 0x76);
+    pub const WARN: Color32 = Color32::from_rgb(0xE8, 0xA3, 0x3D);
+    pub const ERR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x6E);
+    pub const SKIP: Color32 = Color32::from_rgb(0x7F, 0xB8, 0xFF);
+    pub const TXT_WEAK: Color32 = Color32::from_rgb(0x9A, 0xA0, 0xAA);
+}
+
+fn install_style(ctx: &egui::Context) {
+    let mut st = (*ctx.style()).clone();
+    st.visuals = egui::Visuals::dark();
+    st.visuals.panel_fill = pal::BG;
+    st.visuals.extreme_bg_color = pal::INPUT;
+    st.visuals.faint_bg_color = pal::STRIPE;
+    st.visuals.window_fill = pal::BG2;
+    st.visuals.selection.bg_fill = pal::ACCENT.linear_multiply(0.30);
+    st.visuals.selection.stroke = Stroke::new(1.0_f32, pal::ACCENT);
+    st.visuals.widgets.inactive.bg_fill = Color32::from_rgb(0x27, 0x2B, 0x33);
+    st.visuals.widgets.inactive.fg_stroke.color = Color32::from_rgb(0xE2, 0xE6, 0xEC);
+    st.visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x33, 0x39, 0x44);
+    st.visuals.widgets.hovered.fg_stroke.color = Color32::WHITE;
+    st.visuals.widgets.active.bg_fill = Color32::from_rgb(0x3C, 0x43, 0x50);
+    st.visuals.widgets.noninteractive.bg_fill = pal::BG2;
+    st.visuals.widgets.noninteractive.fg_stroke.color = pal::TXT_WEAK;
+    for w in [
+        &mut st.visuals.widgets.noninteractive,
+        &mut st.visuals.widgets.inactive,
+        &mut st.visuals.widgets.hovered,
+        &mut st.visuals.widgets.active,
+        &mut st.visuals.widgets.open,
+    ] {
+        w.rounding = Rounding::same(6.0);
+    }
+    st.visuals.window_rounding = Rounding::same(10.0);
+    st.visuals.menu_rounding = Rounding::same(8.0);
+    st.spacing.button_padding = egui::vec2(12.0, 7.0);
+    st.spacing.item_spacing = egui::vec2(8.0, 7.0);
+    ctx.set_style(st);
+}
 
 #[derive(Clone, PartialEq)]
 enum RowStatus {
@@ -49,6 +106,7 @@ struct App {
     model_ok: bool,
     log: String,
     running: bool,
+    started: Option<Instant>,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Event>>,
     last_summary: String,
@@ -56,7 +114,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        install_style(&cc.egui_ctx);
 
         // popisy: popisy.txt pri programe, inak vstavaný zoznam
         let exe_dir = std::env::current_exe()
@@ -103,8 +161,9 @@ impl App {
             vlakien: avail,
             model_dir,
             model_ok,
-            log: String::from("Analyzátor (Rust test) spustený.\n"),
+            log: String::from("Analyzátor (Rust test) je pripravený.\n"),
             running: false,
+            started: None,
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
             last_summary: String::new(),
@@ -129,8 +188,11 @@ impl App {
         let mut files = Vec::new();
         scan_audio(dir, &mut files);
         sort_natural(&mut files);
-        self.log
-            .push_str(&format!("Priečinok {}: nájdených {} zvukových súborov.\n", dir.display(), files.len()));
+        self.log.push_str(&format!(
+            "Priečinok {}: nájdených {} zvukových súborov.\n",
+            dir.display(),
+            files.len()
+        ));
         self.files = files;
         self.rebuild_rows();
     }
@@ -144,7 +206,10 @@ impl App {
             }
         }
         sort_natural(&mut self.files);
-        self.log.push_str(&format!("Zoznam: {} zvukových súborov.\n", self.files.len()));
+        self.log.push_str(&format!(
+            "Zoznam: {} zvukových súborov.\n",
+            self.files.len()
+        ));
         self.rebuild_rows();
     }
 
@@ -153,7 +218,7 @@ impl App {
             Event::Info(s) => {
                 self.log.push_str(&s);
                 self.log.push('\n');
-                self.last_summary = s; // posledná správa = súhrn behu
+                self.last_summary = s;
             }
             Event::NameSkip { idx, desc } => {
                 if let Some(r) = self.rows.get_mut(idx) {
@@ -195,6 +260,7 @@ impl App {
             }
             Event::Finished { .. } => {
                 self.running = false;
+                self.started = None;
             }
         }
     }
@@ -221,10 +287,10 @@ impl App {
 
         self.cancel.store(false, Ordering::Relaxed);
         self.running = true;
+        self.started = Some(Instant::now());
         self.last_summary.clear();
         self.rebuild_rows();
-        self.log
-            .push_str("▶ Spúšťam analýzu…\n");
+        self.log.push_str("▶ Spúšťam analýzu…\n");
 
         let opts = RunOptions {
             files: self.files.clone(),
@@ -257,6 +323,16 @@ impl App {
                 ctx2.request_repaint();
             }
         });
+    }
+
+    fn status_style(r: &Row) -> (&'static str, Color32) {
+        match r.status {
+            RowStatus::Pending => ("●", pal::TXT_WEAK),
+            RowStatus::Done => ("●", pal::OK),
+            RowStatus::Low => ("●", pal::WARN),
+            RowStatus::Err => ("●", pal::ERR),
+            RowStatus::NameSkip => ("⚡", pal::SKIP),
+        }
     }
 }
 
@@ -292,27 +368,122 @@ impl eframe::App for App {
             }
         }
 
-        // 3) spodný panel: tlačidlá + priebeh + log
-        egui::TopBottomPanel::bottom("ovladanie")
-            .resizable(false)
+        // Ctrl+Enter = Analyzovať
+        if !self.running
+            && !self.files.is_empty()
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl)
+        {
+            self.start_run(ctx);
+        }
+
+        let dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
+        // 3) hlavička: titulok + cesta
+        egui::TopBottomPanel::top("hlavicka")
+            .frame(
+                egui::Frame::default()
+                    .fill(pal::BG2)
+                    .inner_margin(egui::Margin::symmetric(14.0, 10.0)),
+            )
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("🎧 Analyzátor zvukových súborov")
+                            .size(17.0)
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("Rust verzia (test) · rovnaké výsledky ako Python")
+                                .small()
+                                .color(pal::TXT_WEAK),
+                        );
+                    });
+                });
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        !self.running,
+                        egui::TextEdit::singleline(&mut self.path_text)
+                            .hint_text("C:\\Users\\TvojeMeno\\Desktop\\Zvuky")
+                            .desired_width(ui.available_width() - 330.0),
+                    );
+                    if ui
+                        .add_enabled(
+                            !self.running,
+                            egui::Button::new("📂 Vybrať priečinok…"),
+                        )
+                        .clicked()
+                    {
+                        if let Some(dir) = rfd::FileDialog::new()
+                            .set_title("Vybrať priečinok so zvukovými súbormi")
+                            .pick_folder()
+                        {
+                            self.path_text = dir.display().to_string();
+                        }
+                    }
+                    let want_load = ui
+                        .add_enabled(!self.running, egui::Button::new("Načítať ▸"))
+                        .clicked();
+                    if (want_load || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        && !self.running
+                        && !self.path_text.trim().is_empty()
+                    {
+                        let dir = PathBuf::from(self.path_text.trim());
+                        if dir.is_dir() {
+                            self.load_folder(&dir);
+                        } else {
+                            self.log.push_str(&format!(
+                                "✖ Priečinok neexistuje: {}\n",
+                                dir.display()
+                            ));
+                        }
+                    }
+                    if !self.running && !self.files.is_empty() {
+                        if ui.button("✕ Zoznam").clicked() {
+                            self.files.clear();
+                            self.rebuild_rows();
+                            self.log.push_str("Zoznam súborov vymazaný.\n");
+                        }
+                    }
+                });
+            });
+
+        // 4) spodný panel: tlačidlá + priebeh + log
+        egui::TopBottomPanel::bottom("ovladanie")
+            .frame(
+                egui::Frame::default()
+                    .fill(pal::BG2)
+                    .inner_margin(egui::Margin::symmetric(14.0, 10.0)),
+            )
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let can_start = !self.running
                         && !self.files.is_empty()
                         && parse_descriptions(&self.desc_text).len() >= 2;
-                    if ui
-                        .add_enabled(can_start, egui::Button::new("▶  Analyzovať"))
-                        .clicked()
-                    {
+                    let start_btn = egui::Button::new(
+                        egui::RichText::new(format!("▶  Analyzovať  ({})", self.files.len()))
+                            .size(16.0)
+                            .strong(),
+                    )
+                    .min_size(egui::vec2(210.0, 38.0))
+                    .fill(pal::GO);
+                    if ui.add_enabled(can_start, start_btn).clicked() {
                         self.start_run(ctx);
                     }
-                    if self.running
-                        && ui.button("■  Zastaviť").clicked()
-                    {
-                        self.cancel.store(true, Ordering::Relaxed);
-                        self.log.push_str("Zastavujem… (dokončí sa aktuálny súbor)\n");
+                    if self.running {
+                        let stop_btn = egui::Button::new(
+                            egui::RichText::new("■  Zastaviť").size(15.0),
+                        )
+                        .min_size(egui::vec2(120.0, 38.0))
+                        .fill(pal::STOP);
+                        if ui.add(stop_btn).clicked() {
+                            self.cancel.store(true, Ordering::Relaxed);
+                            self.log
+                                .push_str("Zastavujem… (dokončí sa aktuálny súbor)\n");
+                        }
                     }
+
                     let total = self.rows.len();
                     let done = self
                         .rows
@@ -324,181 +495,288 @@ impl eframe::App for App {
                     } else {
                         0.0
                     };
-                    let txt = if self.running || done > 0 {
-                        format!("{done}/{total}")
+                    let mut bar_text = if total > 0 {
+                        format!("{done} / {total}")
                     } else {
                         "—".into()
                     };
+                    if self.running && done > 0 {
+                        if let Some(t) = self.started {
+                            let eta = t.elapsed().as_secs_f32() / done as f32
+                                * (total - done) as f32;
+                            bar_text = format!("{bar_text} · ostáva ~{eta:.0} s");
+                        }
+                    }
                     ui.add(
                         egui::ProgressBar::new(frac)
-                            .show_percentage()
-                            .text(txt),
+                            .desired_width(ui.available_width() - 40.0)
+                            .fill(pal::GO)
+                            .text(bar_text),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.weak(if self.running {
-                            "beží…".to_string()
-                        } else {
-                            self.last_summary.clone()
+                });
+                ui.add_space(2.0);
+                if !self.last_summary.is_empty() && !self.running {
+                    ui.label(
+                        egui::RichText::new(&self.last_summary)
+                            .small()
+                            .color(pal::TXT_WEAK),
+                    );
+                }
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("📜 Log").small().color(pal::TXT_WEAK),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .max_height(150.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.log.as_str())
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY)
+                                    .interactive(false),
+                            );
                         });
-                    });
+                });
+            });
+
+        // 5) pravý panel: popisy + nastavenia
+        egui::SidePanel::right("nastavenia")
+            .resizable(true)
+            .default_width(360.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(pal::BG2)
+                    .inner_margin(egui::Margin::same(12.0)),
+            )
+            .show(ctx, |ui| {
+                ui.add_space(2.0);
+                let n_popisov = parse_descriptions(&self.desc_text).len();
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(format!("📝 Kandidátske popisy ({n_popisov})")).strong(),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("jeden na riadok · ‘#’ = sekcia").small().color(pal::TXT_WEAK),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.desc_text)
+                            .desired_rows(12)
+                            .font(egui::TextStyle::Small),
+                    );
                 });
                 ui.add_space(4.0);
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.log)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_rows(8)
-                        .interactive(false),
-                );
-            });
-
-        // 4) pravý panel: popisy + nastavenia
-        egui::SidePanel::right("nastavenia")
-            .resizable(false)
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.heading("Kandidátske popisy");
-                ui.label(egui::RichText::new("jeden na riadok, ‘#’ = sekcia").weak());
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.desc_text)
-                        .desired_rows(16)
-                        .font(egui::TextStyle::Small),
-                );
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add(
-                    egui::Slider::new(&mut self.segments, 1..=8)
-                        .text("okien (10 s) na súbor"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.min_istota, 0.0..=95.0)
-                        .step_by(1.0)
-                        .text("prah istoty %"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.vlakien, 1..=self.max_vlakien.max(4))
-                        .text(format!("vlákien dekódu (auto: {})", self.max_vlakien)),
-                );
-                ui.label(
-                    egui::RichText::new(format!("Detekovaných logických jadier: {}", self.max_vlakien))
-                        .small()
-                        .weak(),
-                );
-                ui.checkbox(
-                    &mut self.skip_by_name,
-                    "AI preskočiť pri jednoznačnom názve",
-                );
-                ui.checkbox(
-                    &mut self.istota_do_popisu,
-                    "zapísať istotu do popisu (napr. 87 %)",
-                );
-                ui.add_space(8.0);
-                ui.separator();
-                if self.model_ok {
-                    ui.label(
-                        egui::RichText::new("✔ AI model nájdený").color(egui::Color32::from_rgb(90, 200, 110)),
-                    );
-                    ui.weak(self.model_dir.display().to_string());
-                } else {
-                    ui.label(
-                        egui::RichText::new("✖ AI model nenájdený – nakopírujte tento priečinok k SPUSTI.bat (k priečinku models)")
-                            .color(egui::Color32::from_rgb(230, 90, 90)),
-                    );
-                }
-            });
-
-        // 5) hlavný panel: súbory
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let edit = egui::TextEdit::singleline(&mut self.path_text)
-                    .hint_text("C:\\Users\\TvojeMeno\\Desktop\\Zvuky")
-                    .desired_width(ui.available_width() - 210.0);
-                ui.add(edit);
-                if ui.button("Vybrať priečinok…").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new()
-                        .set_title("Vybrať priečinok so zvukovými súbormi")
-                        .pick_folder()
-                    {
-                        self.path_text = dir.display().to_string();
-                    }
-                }
-                let load_clicked = ui.button("Načítať").clicked();
-                if (load_clicked || ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                    && !self.path_text.trim().is_empty()
-                {
-                    let dir = PathBuf::from(self.path_text.trim());
-                    if dir.is_dir() {
-                        self.load_folder(&dir);
-                    } else {
-                        self.log
-                            .push_str(&format!("✖ Priečinok neexistuje: {}\n", dir.display()));
-                    }
-                }
-            });
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("Tip: priečinok alebo súbory môžete potiahnuť myskou priamo do okna.")
-                    .weak(),
-            );
-            ui.add_space(4.0);
-            ui.separator();
-
-            let n = self.files.len();
-            ui.heading(if n == 0 {
-                "Žiadne súbory – vyberte priečinok".to_string()
-            } else {
-                format!("Zvukové súbory ({n})")
-            });
-            ui.add_space(4.0);
-
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                egui::Grid::new("subory")
-                    .striped(true)
-                    .num_columns(4)
-                    .spacing([12.0, 4.0])
+                egui::CollapsingHeader::new(egui::RichText::new("⚙ Nastavenia analýzy").strong())
+                    .default_open(true)
                     .show(ui, |ui| {
-                        for r in &self.rows {
-                            let (icon, color) = match r.status {
-                                RowStatus::Pending => ("…", egui::Color32::GRAY),
-                                RowStatus::Done => ("✔", egui::Color32::from_rgb(90, 200, 110)),
-                                RowStatus::Low => ("⚠", egui::Color32::from_rgb(224, 138, 0)),
-                                RowStatus::Err => ("✖", egui::Color32::from_rgb(230, 90, 90)),
-                                RowStatus::NameSkip => ("⚡", egui::Color32::from_rgb(120, 170, 255)),
-                            };
-                            ui.label(egui::RichText::new(icon).color(color).strong());
-                            ui.label(egui::RichText::new(&r.name).strong());
-                            ui.label(&r.desc);
+                        let seg_txt = format!("okien (10 s) na súbor: {}", self.segments);
+                        ui.add(egui::Slider::new(&mut self.segments, 1..=8).text(seg_txt))
+                        .on_hover_text("Dlhšie nahrávky sa analyzujú vo viacerich 10-sekundových oknách; ich výsledky sa spriemerujú.");
+                        let mi_txt = format!("prah istoty: {} %", self.min_istota as i32);
+                        ui.add(
+                            egui::Slider::new(&mut self.min_istota, 0.0..=95.0)
+                                .step_by(1.0)
+                                .text(mi_txt),
+                        )
+                        .on_hover_text("Popis s istotou pod touto hodnotou sa do súboru nezapíše (a starý náš popis sa zmaže).");
+                        ui.checkbox(
+                            &mut self.skip_by_name,
+                            "AI preskočiť pri jednoznačnom názve",
+                        )
+                        .on_hover_text("Keď slová z názvu priamo a jednoznačne sedia na jediný popis, AI sa nepoužije.");
+                        ui.checkbox(
+                            &mut self.istota_do_popisu,
+                            "zapísať istotu do popisu (napr. 87 %)",
+                        );
+                    });
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("⚡ Výkon").strong())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let vl_txt = format!("vlákien dekódu: {}", self.vlakien);
+                        ui.add(
+                            egui::Slider::new(&mut self.vlakien, 1..=self.max_vlakien.max(4))
+                                .text(vl_txt),
+                        )
+                        .on_hover_text("Dekódovanie a predspracovanie zvuku beží paralelne; AI beží rovnako.");
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Počet jadier nájdených v počítači: {} (prednastavené automaticky)",
+                                self.max_vlakien
+                            ))
+                            .small()
+                            .color(pal::TXT_WEAK),
+                        );
+                    });
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if self.model_ok {
                             ui.label(
-                                egui::RichText::new(match r.conf {
-                                    Some(c) => format!("{:.0} %", c * 100.0),
-                                    None => String::new(),
-                                })
-                                .color(color),
+                                egui::RichText::new("●").color(pal::OK),
                             );
-                            ui.end_row();
-                            if !r.note.is_empty() {
-                                ui.label("");
-                                ui.label(
-                                    egui::RichText::new(&r.note).small().weak(),
-                                )
-                                .on_hover_text(&r.note);
-                                ui.label("");
-                                ui.label("");
-                                ui.end_row();
-                            }
+                            ui.label(egui::RichText::new("AI model nájdený").strong());
+                        } else {
+                            ui.label(egui::RichText::new("●").color(pal::ERR));
+                            ui.label(
+                                egui::RichText::new("AI model nenájdený!").strong(),
+                            );
                         }
                     });
+                    if self.model_ok {
+                        ui.label(
+                            egui::RichText::new(self.model_dir.display().to_string())
+                                .small()
+                                .color(pal::TXT_WEAK),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new(
+                                "Nakopírujte tento priečinok do hlavného priečinka programu \
+                                 (k SPUSTI.bat, tam kde je priečinok „models“) a spustite znovu.",
+                            )
+                            .small()
+                            .color(pal::TXT_WEAK),
+                        );
+                    }
+                });
             });
-        });
+
+        // 6) hlavný panel: tabuľka súborov
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().inner_margin(egui::Margin::same(12.0)))
+            .show(ctx, |ui| {
+                if self.files.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("📂").size(42.0),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Žiadne zvukové súbory").size(19.0).strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Potiahnite sem priečinok so zvukmi (wav/mp3/ogg/flac)\nalebo použite „📂 Vybrať priečinok…“ hore.",
+                                )
+                                .color(pal::TXT_WEAK),
+                            );
+                        });
+                    });
+                } else {
+                    let table = TableBuilder::new(ui)
+                        .striped(true)
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::exact(36.0))
+                        .column(Column::initial(300.0).at_least(140.0).clip(true))
+                        .column(Column::remainder().clip(true))
+                        .column(Column::exact(72.0))
+                        .header(26.0, |mut h| {
+                            h.col(|_| {});
+                            h.col(|ui| {
+                                ui.label(egui::RichText::new("SÚBOR").small().color(pal::TXT_WEAK));
+                            });
+                            h.col(|ui| {
+                                ui.label(egui::RichText::new("POPIS").small().color(pal::TXT_WEAK));
+                            });
+                            h.col(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new("ISTOTA")
+                                                .small()
+                                                .color(pal::TXT_WEAK),
+                                        );
+                                    },
+                                );
+                            });
+                        });
+                    table.body(|mut body| {
+                        for r in &self.rows {
+                            let (dot, color) = Self::status_style(r);
+                            let h = if r.note.is_empty() { 30.0 } else { 44.0 };
+                            body.row(h, |mut row| {
+                                row.col(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(dot).color(color).size(13.0),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    ui.label(egui::RichText::new(&r.name).strong());
+                                });
+                                row.col(|ui| {
+                                    let inner = ui.vertical(|ui| {
+                                        ui.label(&r.desc);
+                                        if !r.note.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new(&r.note)
+                                                    .small()
+                                                    .color(pal::TXT_WEAK),
+                                            );
+                                        }
+                                    });
+                                    inner.response.on_hover_text(format!("{}\n{}", r.name, r.note));
+                                });
+                                row.col(|ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if let Some(c) = r.conf {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{:.0} %",
+                                                        c * 100.0
+                                                    ))
+                                                    .strong()
+                                                    .color(color),
+                                                );
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        }
+                    });
+                }
+
+                // 7) zvýraznenie pri pretiahnutí súborov
+                if dragging {
+                    let rect = ui.max_rect();
+                    ui.painter().rect_filled(
+                        rect,
+                        Rounding::same(12.0),
+                        pal::ACCENT.linear_multiply(0.07),
+                    );
+                    ui.painter().rect_stroke(
+                        rect.shrink(2.0),
+                        Rounding::same(12.0),
+                        Stroke::new(2.0_f32, pal::ACCENT),
+                    );
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        "↧  Pusťte súbory alebo priečinok sem",
+                        FontId::proportional(20.0),
+                        pal::ACCENT,
+                    );
+                }
+            });
     }
 }
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1150.0, 750.0])
-            .with_min_inner_size([880.0, 560.0]),
+            .with_inner_size([1200.0, 780.0])
+            .with_min_inner_size([900.0, 580.0]),
         ..Default::default()
     };
     eframe::run_native(
