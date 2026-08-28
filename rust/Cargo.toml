@@ -1,6 +1,6 @@
 [package]
 name = "analyzator-rs"
-version = "0.1.0"
+version = "0.10.1"
 edition = "2021"
 description = "Analyzátor zvukových súborov – rýchla Rust verzia (rovnaký CLAP model)"
 license = "MIT"
@@ -28,6 +28,7 @@ path = "src/gui.rs"
 [dependencies]
 eframe = "0.28"
 egui_extras = "0.28"
+ureq = { version = "2", features = ["json"] }
 rfd = "0.14"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

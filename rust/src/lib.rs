@@ -7,6 +7,7 @@ pub mod model;
 pub mod names;
 pub mod pipeline;
 pub mod tags;
+pub mod updater;
 
 use std::path::{Path, PathBuf};
 

@@ -5,6 +5,35 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.10.1] – 2026-08-28 – Aktualizácie priamo v programe (GUI)
+
+Prečo: používateľ si prial bežný mechanizmus aktualizácií ako v
+ostatných programoch – doteraz bolo treba stiahnuť ZIP ručne
+(GitHub Releases) a prepísať priečinok.
+
+### Pridané
+- ** Automatická kontrola pri štarte**: GUI potichu opýta GitHub
+  API na najnovšie vydanie; ak je novšia verzia, v hlavičke okna sa
+  zobrazí tlačidlo „🔄 Aktualizovať na vX.Y.Z“ (inak nič neruší).
+- **Jednokliková inštalácia**: klik stiahne balík (progress % v
+  hlavičke, detaily v logu), rozbalí ho a ponúkne „↻ Nainštalovať
+  a reštartovať“ – malý .bat počká na ukončenie programu,
+  prekopíruje nové súbory (robocopy, ako AKTUALIZUJ.bat), spustí
+  novú verziu a uprace po sebe (_update.zip, _update_tmp, sám seba).
+- **Manuálna kontrola**: tlačidlo „🔄 Skontrolovať aktualizácie“
+  vpravo dole (vypíše „máte najnovšiu“ / ponúkne aktualizáciu).
+- Verzia programu sa zobrazuje v hlavičke (vX.Y.Z); CLI má
+  `--aktualizacia` (kontrola + stiahnutie + rozbalenie, na test).
+- `src/updater.rs` v knižnici (GUI aj CLI zdieľajú logiku); HTTP
+  cez ureq (rustls). **Žiadny token v programe** – repozitár je
+  verejný; token sa číta len z premennej prostredia GITHUB_TOKEN
+  (vývoj/test).
+- Overené end-to-end testom: sfalšovaná staršia verzia (0.9.9)
+  našla v0.10.0, stiahla 16,6 MB z GitHubu a rozbalila všetkých
+  7 súborov ✓; inštalačný krok je Windows-only (CREATE_NO_WINDOW,
+  čakanie na PID cez PowerShell Wait-Process) – overí sa pri
+  prvom reálnom vydaní novej verzie.
+
 ## [0.10.0] – 2026-08-28 – Oprava „invalid dimensions“ + prepracovaný dizajn okna
 
 Prečo: (1) pri dlhších súboroch Rust GUI/CLI padlo chybou

@@ -20,7 +20,34 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use analyzator_rs::pipeline::{self, Event, RunOptions};
+use analyzator_rs::updater;
 use analyzator_rs::{basename, is_audio_file, parse_descriptions, scan_audio, sort_natural};
+
+/// Stav aktualizácie (GUI).
+enum Upd {
+    Idle,
+    Checking,
+    Latest,
+    Avail {
+        tag: String,
+        url: String,
+        size: u64,
+        name: String,
+    },
+    Downloading {
+        pct: f32,
+    },
+    Ready {
+        inner: PathBuf,
+        tag: String,
+    },
+    Err(String),
+}
+
+enum UpdMsg {
+    State(Upd),
+    Log(String),
+}
 
 /// Predvolených 69 popisov – rovnakých ako Python GUI.
 const DEFAULT_POPISY: &str = include_str!("popisy_default.txt");
@@ -110,6 +137,8 @@ struct App {
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Event>>,
     last_summary: String,
+    upd: Upd,
+    upd_rx: Option<Receiver<UpdMsg>>,
 }
 
 impl App {
@@ -167,7 +196,107 @@ impl App {
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
             last_summary: String::new(),
+            upd: Upd::Idle,
+            upd_rx: None,
         }
+    }
+
+    /// Na pozadí skontroluje novú verziu na GitHube (mlčky pri chybe).
+    fn spawn_update_check(&mut self, ctx: &egui::Context, manual: bool) {
+        if matches!(self.upd, Upd::Checking | Upd::Downloading { .. }) {
+            return;
+        }
+        self.upd = Upd::Checking;
+        let (tx, rx) = mpsc::channel::<UpdMsg>();
+        let ctx2 = ctx.clone();
+        self.upd_rx = Some(rx);
+        std::thread::spawn(move || {
+            let send = |st: Upd, log: Option<String>| {
+                let _ = tx.send(UpdMsg::State(st));
+                if let Some(l) = log {
+                    let _ = tx.send(UpdMsg::Log(l));
+                }
+                ctx2.request_repaint();
+            };
+            match updater::latest_release() {
+                Ok(rel) => {
+                    if updater::is_newer(&rel.tag, env!("CARGO_PKG_VERSION")) {
+                        send(
+                            Upd::Avail {
+                                tag: rel.tag.clone(),
+                                url: rel.url,
+                                size: rel.size,
+                                name: rel.name.clone(),
+                            },
+                            Some(format!(
+                                "🔄 Nová verzia {} je k dispozícii ({:.1} MB).",
+                                rel.tag,
+                                rel.size as f64 / 1e6
+                            )),
+                        );
+                    } else if manual {
+                        send(Upd::Latest, Some("Máte najnovšiu verziu.".into()));
+                    } else {
+                        send(Upd::Latest, None);
+                    }
+                }
+                Err(e) => {
+                    if manual {
+                        send(Upd::Err(e.to_string()), Some(format!("Kontrola aktualizácií zlyhala: {e}")));
+                    } else {
+                        send(Upd::Idle, None); // tichý neúspech pri štarte
+                    }
+                }
+            }
+        });
+    }
+
+    /// Stiahne a rozbalí novú verziu na pozadí.
+    fn spawn_update_download(&mut self, ctx: &egui::Context, url: String, size: u64, tag: String) {
+        self.upd = Upd::Downloading { pct: 0.0 };
+        let (tx, rx) = mpsc::channel::<UpdMsg>();
+        let ctx2 = ctx.clone();
+        self.upd_rx = Some(rx);
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        std::thread::spawn(move || {
+            let send = |st: Upd, log: Option<String>| {
+                let _ = tx.send(UpdMsg::State(st));
+                if let Some(l) = log {
+                    let _ = tx.send(UpdMsg::Log(l));
+                }
+                ctx2.request_repaint();
+            };
+            let zip = exe_dir.join("_update.zip");
+            let last_pct = std::cell::Cell::new(-1.0f32);
+            let res = updater::download_to(&url, &zip, &|done, total| {
+                if total > 0 {
+                    let pct = (done as f32 / total as f32 * 100.0).min(100.0);
+                    if pct - last_pct.get() >= 5.0 {
+                        last_pct.set(pct);
+                        let _ = tx.send(UpdMsg::State(Upd::Downloading { pct }));
+                        ctx2.request_repaint();
+                    }
+                }
+            });
+            if let Err(e) = res {
+                send(Upd::Err(e.to_string()), Some(format!("Sťahovanie zlyhalo: {e}")));
+                return;
+            }
+            let _ = tx.send(UpdMsg::Log(format!("Rozbaľujem {}...", tag)));
+            ctx2.request_repaint();
+            let dest = exe_dir.join("_update_tmp");
+            let _ = std::fs::remove_dir_all(&dest);
+            match updater::extract_bundle(&zip, &dest) {
+                Ok(inner) => send(
+                    Upd::Ready { inner, tag },
+                    Some("✅ Nová verzia je stiahnutá – kliknite „Nainštalovať a reštartovať“.".into()),
+                ),
+                Err(e) => send(Upd::Err(e.to_string()), Some(format!("Rozbalenie zlyhalo: {e}"))),
+            }
+        });
     }
 
     fn rebuild_rows(&mut self) {
@@ -336,6 +465,33 @@ impl App {
     }
 }
 
+impl App {
+    /// Aplikuje stiahnutú aktualizáciu: bat počka na ukončenie,
+    /// prekopíruje súbory a spustí novú verziu.
+    fn install_update(&mut self) {
+        let inner = match &self.upd {
+            Upd::Ready { inner, .. } => inner.clone(),
+            _ => return,
+        };
+        self.log
+            .push_str("↻ Inštalujem aktualizáciu a reštartujem…\n");
+        #[cfg(windows)]
+        {
+            match updater::install_and_restart(&inner, std::process::id()) {
+                Ok(_) => std::process::exit(0),
+                Err(e) => self.log.push_str(&format!("✖ Instalácia zlyhala: {e}\n")),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = inner;
+            self.log.push_str(
+                "Na tomto systéme rozbaľte obsah priečinka _update_tmp/analyzator-rs-windows ručne.\n",
+            );
+        }
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 1) prijaté správy z pracovného vlákna
@@ -347,6 +503,21 @@ impl eframe::App for App {
                 }
             }
             self.rx = Some(rx);
+        }
+
+        // 1b) správy o aktualizácii
+        if let Some(rx) = self.upd_rx.take() {
+            loop {
+                match rx.try_recv() {
+                    Ok(UpdMsg::State(st)) => self.upd = st,
+                    Ok(UpdMsg::Log(l)) => {
+                        self.log.push_str(&l);
+                        self.log.push('\n');
+                    }
+                    Err(_) => break,
+                }
+            }
+            self.upd_rx = Some(rx);
         }
 
         // 2) potiahnuté súbory/priečinky myšou
@@ -376,6 +547,11 @@ impl eframe::App for App {
             self.start_run(ctx);
         }
 
+        // kontrola aktualizácií raz pri štarte (mlčky)
+        if matches!(self.upd, Upd::Idle) {
+            self.spawn_update_check(ctx, false);
+        }
+
         let dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
         // 3) hlavička: titulok + cesta
@@ -393,10 +569,67 @@ impl eframe::App for App {
                             .strong(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match &self.upd {
+                            Upd::Avail { tag, .. } => {
+                                let t = tag.clone();
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(format!("🔄 Aktualizovať na {t}"))
+                                                .small()
+                                                .strong(),
+                                        )
+                                        .fill(pal::ACCENT.linear_multiply(0.25)),
+                                    )
+                                    .clicked()
+                                {
+                                    if let Upd::Avail { url, size, tag, .. } =
+                                        std::mem::replace(&mut self.upd, Upd::Idle)
+                                    {
+                                        self.spawn_update_download(ctx, url, size, tag);
+                                    }
+                                }
+                            }
+                            Upd::Downloading { pct } => {
+                                ui.label(
+                                    egui::RichText::new(format!("⬇ sťahujem {pct:.0} %"))
+                                        .small()
+                                        .color(pal::ACCENT),
+                                );
+                            }
+                            Upd::Ready { tag, .. } => {
+                                let t = tag.clone();
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("↻ Nainštalovať a reštartovať")
+                                                .small()
+                                                .strong(),
+                                        )
+                                        .fill(pal::GO),
+                                    )
+                                    .clicked()
+                                {
+                                    self.install_update();
+                                }
+                                ui.label(egui::RichText::new(format!("✅ {t} pripravená")).small());
+                            }
+                            Upd::Err(e) => {
+                                ui.label(
+                                    egui::RichText::new(format!("⚠ aktualizácia: {e}"))
+                                        .small()
+                                        .color(pal::WARN),
+                                );
+                            }
+                            _ => {}
+                        }
                         ui.label(
-                            egui::RichText::new("Rust verzia (test) · rovnaké výsledky ako Python")
-                                .small()
-                                .color(pal::TXT_WEAK),
+                            egui::RichText::new(format!(
+                                "v{} · Rust test · rovnaké výsledky ako Python",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                            .small()
+                            .color(pal::TXT_WEAK),
                         );
                     });
                 });
@@ -613,6 +846,22 @@ impl eframe::App for App {
                         );
                     });
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let checking = matches!(self.upd, Upd::Checking | Upd::Downloading { .. });
+                        if ui
+                            .add_enabled(!checking, egui::Button::new("🔄 Skontrolovať aktualizácie"))
+                            .on_hover_text("Zistí, či je na GitHube novšia verzia programu, a ponúkne jej stiahnutie.")
+                            .clicked()
+                        {
+                            self.spawn_update_check(ctx, true);
+                        }
+                        if matches!(self.upd, Upd::Checking) {
+                            ui.label(egui::RichText::new("kontrolujem…").small().color(pal::TXT_WEAK));
+                        } else if matches!(self.upd, Upd::Latest) {
+                            ui.label(egui::RichText::new("máte najnovšiu").small().color(pal::OK));
+                        }
+                    });
                     ui.separator();
                     ui.horizontal(|ui| {
                         if self.model_ok {

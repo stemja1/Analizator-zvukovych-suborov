@@ -45,6 +45,10 @@ fn parse_args() -> Result<Opts> {
         print_usage();
         std::process::exit(0);
     }
+    if args.iter().any(|a| a == "--aktualizacia") {
+        run_update_check()?;
+        std::process::exit(0);
+    }
     let mut folder: Option<PathBuf> = None;
     let mut popisy = PathBuf::from("popisy.txt");
     let mut segments = 4usize;
@@ -104,7 +108,7 @@ fn parse_args() -> Result<Opts> {
 }
 
 fn print_usage() {
-    println!("Analyzátor zvukových súborov – Rust verzia (rýchly test výkonu)");
+    println!("Analyzátor zvukových súborov – Rust verzia {} (rýchly test výkonu)", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Použitie: analyzator-rs PRIECINOK [možnosti]");
     println!("  --popisy SUBOR        kandidátske popisy, jeden na riadok (default: popisy.txt)");
@@ -116,6 +120,31 @@ fn print_usage() {
     println!("  --vlakien N           paralelné dekódovanie (default: všetky detekované jadrá = {})", available_threads());
     println!();
     println!("Grafická verzia: spustite analyzator-gui (okno ako Python verzia).");
+}
+
+/// Kontrola aktualizácie z príkazového riadku (rovnaká logika ako GUI).
+fn run_update_check() -> Result<()> {
+    let cur = env!("CARGO_PKG_VERSION");
+    println!("Aktuálna verzia: {cur}");
+    let rel = analyzator_rs::updater::latest_release()?;
+    println!("Najnovšia na GitHube: {} ({})", rel.tag, rel.name);
+    if !analyzator_rs::updater::is_newer(&rel.tag, cur) {
+        println!("Máte najnovšiu verziu.");
+        return Ok(());
+    }
+    println!("Nová verzia je k dispozícii – sťahujem {} ({:.1} MB)...",
+             rel.url, rel.size as f64 / 1e6);
+    let zip = std::path::PathBuf::from("_update.zip");
+    analyzator_rs::updater::download_to(&rel.url, &zip, &|d, t| {
+        if t > 0 && d % (5 * 1024 * 1024) < 256 * 1024 {
+            println!("  {} / {} MB", d / 1_048_576, t / 1_048_576);
+        }
+    })?;
+    let dest = std::path::PathBuf::from("_update_tmp");
+    let inner = analyzator_rs::updater::extract_bundle(&zip, &dest)?;
+    println!("Rozbalené do: {}", inner.display());
+    println!("V GUI pokračujete tlačidlom Nainštalovať; tu iba testujeme.");
+    Ok(())
 }
 
 fn load_descriptions_file(path: &std::path::Path) -> Result<Vec<String>> {
