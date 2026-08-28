@@ -5,6 +5,22 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.8.1] – 2026-08-28 – Oprava TEST-RUST.bat (okno len prebliklo)
+
+Prečo: po dvojkliku na TEST-RUST.bat čierne okno okamžite zmizlo.
+Príčina: v texte výpisu „echo (napríklad C:\…\Zvuky):“ bola zátvorka
+„)“ VNÚTRI príkazového bloku if (…) – Windows ju vyhodnotil ako koniec
+bloku → chybové ukončenie skriptu ešte pred akýmkoľvek výpisom.
+Program (exe) bol v poriadku, chybný bol len spúšťač.
+
+### Opravené
+- TEST-RUST.bat prepísaný bez zátvoriek v textoch výpisov (skript
+  ich nesmie obsahovať vnútri blokov if); pridaný záverečný výpis
+  „Hotovo“. Nástroj kontroly: žiadny echo riadok so zátvorkou.
+- Nový Windows balík v0.8.1 (exe a knižnice nezmenené – rovnaký
+  program 0.8.0, len spúšťač); release v0.8.0 zmazaná, zostáva
+  jediná aktuálna.
+
 ## [0.8.0] – 2026-08-28 – Odstránené učenie sa (slová aj zvukové vzory)
 
 Prečo: používateľ hodnotil výsledky učenia ako nezmyselné – funkcia
