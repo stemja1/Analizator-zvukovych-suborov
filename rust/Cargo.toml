@@ -17,7 +17,17 @@ ort-directml = ["ort/directml"]
 # priľahlo k programu) – používané pre Windows build
 ort-load-dynamic = ["ort/load-dynamic"]
 
+[[bin]]
+name = "analyzator-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "analyzator-gui"
+path = "src/gui.rs"
+
 [dependencies]
+eframe = "0.28"
+rfd = "0.14"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

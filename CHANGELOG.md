@@ -5,6 +5,43 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.9.0] – 2026-08-28 – Rust GUI: grafické okno k Rust verzii
+
+Prečo: Rust verzia bola doteraz len príkazový riadok; používateľ si
+ju overil na svojom stroji (funguje) a prial si GUI ako má Python
+verzia. Zdrojový kód CLI bol preto preštruktúrovaný na spoločnú
+knižnicu (pipeline) + dva programy: CLI aj GUI zdieľajú úplne rovnakú
+logiku, takže výsledky zostávajú identické.
+
+### Pridané
+- **`analyzator-gui.exe`** – grafické okno (egui/eframe, bez ďalších
+  závislostí; väzí len na štandardných Windows knižniciach + OpenGL):
+  zoznam súborov so stavmi (✔/⚠/✖/⚡/…), editovateľný zoznam popisov
+  (predvolených 69, načítajú sa z popisy.txt pri programe), nastavenia
+  (počet okien, prah istoty, vlákna, preskočenie AI podľa názvu,
+  istota do popisu), tlačidlá Analyzovať/Zastaviť, progress bar a log.
+  Priečinok so zvukmi možno **potiahnuť myskou priamo do okna** alebo
+  vybrať dialógom. AI model hľadá pri programe, o úroveň vyššie
+  (odporúčané umiestnenie v hlavnom priečinku programu) aj v CWD.
+  Analýza beží vo vlastnom vlákne – okno nezamrzá a beh ide zastaviť.
+- **Refactor: `src/lib.rs` + `src/pipeline.rs`** – celá analýza
+  (model, príprava, inference, pravidlá, zápisy) presunutá do
+  knižnice so správami (Event) a zastavením (AtomicBool). CLI
+  (main.rs) aj GUI (gui.rs) sú nad ňou tenké obaly.
+- Windows balík v0.9.0: pribudol analyzator-gui.exe (19,4 MB),
+  README-RUST prepísané (GUI ako hlavný spôsob, CLI pre hromadné
+  spúšťanie). Bez prehrávania zvukov (na kontrolu zvuku slúži Python
+  verzia) – zamietnuté: zabudovávanie prehrávača (veľkosť a zložitosť
+  balíka by výrazne vzrástli bez úžitku pre testovacie využitie).
+
+### Overené
+- CLI po refactori: build bez varovaní + funkčný test s modelom
+  (rovnaký výsledok ako pred zmenou).
+- GUI: kompilácia bez chýb (host aj cross-target), exe má subsystém
+  „Windows GUI“ (nepreblikne mu konzola) a len štandardné DLL.
+- GUI runtime vizuálne testovať v sandboxe nemožno (bez displeja) –
+  overí používateľ; prípadné chyby opravím.
+
 ## [0.8.1] – 2026-08-28 – Oprava TEST-RUST.bat (okno len prebliklo)
 
 Prečo: po dvojkliku na TEST-RUST.bat čierne okno okamžite zmizlo.

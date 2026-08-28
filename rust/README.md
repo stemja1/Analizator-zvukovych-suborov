@@ -1,7 +1,9 @@
 # Analyzátor – Rust verzia (testovacia alternatíva)
 
-Rovnaká logika ako Python verzia (0.6.0+), spustená ako jeden program
-bez Pythonu. CLI, zatiaľ bez GUI. Python verzia zostáva hlavná.
+Rovnaká logika ako Python verzia, spustená ako jeden program bez Pythonu.
+Dva spustiteľné súbory: `analyzator-gui` (grafické okno) a
+`analyzator-rs` (príkazový riadok) – obe používajú spoločnú knižnicu
+(`lib.rs` + `pipeline.rs`). Python verzia zostáva hlavná.
 
 ## Zostavenie
 ```
@@ -12,7 +14,11 @@ Výsledok: `target/release/analyzator-rs` (~38 MB, obsahuje ONNX Runtime).
 
 DirectML (GPU na Windows): `cargo build --release --features ort-directml`.
 
-## Použitie
+## Použitie – GUI
+Dvojklik na `analyzator-gui` (okno: súbory vľavo, popisy a nastavenia
+vpravo, log dole; priečinok so zvukmi možno potiahnuť do okna).
+
+## Použitie – CLI
 ```
 analyzator-rs PRIECINOK [prepínače]
   --popisy SÚBOR         zoznam popisov (1 na riadok, predvolene popisy.txt)
