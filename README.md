@@ -116,6 +116,18 @@ Vypíše poradie všetkých kandidátov so skóre a zapíše najlepší do metad
 | Nízka istota | Pridajte viac rozličných popisov, formulujte konkrétnejšie (v angličtine), alebo skúste iný úsek — analyzuje sa stredných 10 s. |
 | Chcem analyzovať celý súbor, nie 10 s | Upravte `CLIP_SECONDS` v `core_analyzer.py`. |
 
+## Rust verzia (testovacia alternatíva)
+
+Vedľa Python verzie existuje rýchlejšia **Rust verzia** (CLI, bez okna) –
+dáva **rovnaké výsledky** (číselne overená parita) a je cca **1,7–1,9×
+rýchlejšia**. Python verzia zostáva hlavná.
+
+- Hotový Windows balík (`analyzator-rs.exe` + knižnice + `TEST-RUST.bat`,
+  nič sa neinštaluje): [Releases – analyzator-rs-windows.zip](https://github.com/stemja1/Analizator-zvukovych-suborov/releases) –
+  rozbaľte do hlavného priečinka programu a spustite `TEST-RUST.bat`.
+- Zdrojové kódy: `rust/` (`cargo build --release`; GPU build pozri `rust/README.md`).
+- Viac detailov: sekcia 09 v `navod-analyzator.html`.
+
 ## Licencia
 
 MIT (pozri `LICENSE`).
