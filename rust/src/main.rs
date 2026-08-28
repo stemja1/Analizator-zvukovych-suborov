@@ -4,7 +4,7 @@
 //! Použitie:
 //!   analyzator-rs <priecinok> [--popisy popisy.txt] [--segments 4]
 //!                [--min-istota 50] [--model-dir models/clap_htsat_unfused_onnx]
-//!                [--bez-preskocenia] [--istota-do-popisu] [--vlakien 4]
+//!                [--bez-preskocenia] [--istota-do-popisu] [--vlakien N]
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -12,6 +12,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use analyzator_rs::pipeline::{self, Event, RunOptions};
+
+/// Počet logických jadier stroja (auto-detekcia; záloha 4).
+pub fn available_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
 
 struct Opts {
     folder: PathBuf,
@@ -45,7 +52,7 @@ fn parse_args() -> Result<Opts> {
     let mut model_dir = PathBuf::from("models/clap_htsat_unfused_onnx");
     let mut skip_by_name = true;
     let mut istota_do_popisu = false;
-    let mut vlakien = 4usize;
+    let mut vlakien = available_threads();
     let mut dump_mel: Option<PathBuf> = None;
     let mut debug_audio = false;
     let mut dump_emb: Option<PathBuf> = None;
@@ -88,7 +95,7 @@ fn parse_args() -> Result<Opts> {
         model_dir,
         skip_by_name,
         istota_do_popisu,
-        vlakien: vlakien.clamp(1, 16),
+        vlakien: vlakien.clamp(1, 64),
         dump_mel,
         debug_audio,
         dump_emb,
@@ -106,7 +113,7 @@ fn print_usage() {
     println!("  --model-dir DIR       priečinok s ONNX modelmi (default models/clap_htsat_unfused_onnx)");
     println!("  --bez-preskocenia     vypne preskakovanie AI podľa názvu súboru");
     println!("  --istota-do-popisu    zapíše istotu do popisu (napr. ‘(istota 87 %)’)");
-    println!("  --vlakien N           paralelné dekódovanie (default 4)");
+    println!("  --vlakien N           paralelné dekódovanie (default: všetky detekované jadrá = {})", available_threads());
     println!();
     println!("Grafická verzia: spustite analyzator-gui (okno ako Python verzia).");
 }

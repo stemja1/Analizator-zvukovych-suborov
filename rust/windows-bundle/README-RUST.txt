@@ -1,4 +1,4 @@
-﻿ANALYZÁTOR ZVUKOVÝCH SÚBOROV – RUST TESTOVACIA VERZIA (0.9.0)
+﻿ANALYZÁTOR ZVUKOVÝCH SÚBOROV – RUST TESTOVACIA VERZIA (0.9.1)
 ================================================================
 
 Rýchlejšia alternatívna verzia programu. Dáva ROVNAKÉ výsledky
@@ -29,6 +29,8 @@ AKO POUŽÍVAŤ (GRAFICKÁ VERZIA)
 
 POZNÁMKY
   - Program podporuje aj GPU (DirectML) automaticky, ak je k dispozícii.
+  - Počet vlákien dekódovania sa automaticky nastaví na všetky
+    dostupné jadrá procesora (v okne si ho môžeš zmeniť).
   - Bez učenia sa (od verzie 0.8.0) – istotu posilní len priama zhoda
     slova z názvu súboru s textom popisu.
   - Okno nevie prehrávať zvuky (Python verzia to vie) – na kontrolu

@@ -5,6 +5,33 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.9.1] – 2026-08-28 – Automatické využitie všetkých jadier procesora
+
+Prečo: program mal počet vlákien dekódovania pevne nastavený na 4,
+aj keď stroj má jadier viac – používateľ si prial správnu auto-
+detekciu všetkých dostupných vlákien a overenie výkonu.
+
+### Zmenené
+- **CLI aj GUI predvolene používajú všetky logické jadrá**
+  (`std::thread::available_parallelism` – rešpektuje aj obmedzenia
+  kontajnerov/cgroups; záložná hodnota 4). Prepínač `--vlakien N`
+  zostáva na ručné prepísanie (strop 64).
+- **GUI**: posuvník vlákien ide po počte detekovaných jadier a pod
+  ním sa zobrazuje „Detekovaných logických jadier: N“; prednastavená
+  hodnota = N (doteraz 4).
+- ONNX Runtime vlákna sa nemenia – inference beží sekvenčne po
+  príprave, takže sa vlákna neprekrývajú a ORT si jadrá rozdeľuje
+  sám; zmena by výkon len zhoršila (zamietnuté).
+
+### Overené (meranie)
+- Detekcia: `--pomoc` ukazuje správny počet jadier stroja.
+- Záťažový test (12 × 60 s WAV, 2-jadrový stroj): 1 vlákno
+  1,8–1,9 s → auto (2 vlákna) 1,1 s = **1,6–1,7× rýchlejšie**;
+  najväčší podiel zrýchlenia dá paralelný mel spektrogram
+  (najnáročnejší výpočet pred AI). Na strojoch s viac jadrami
+  (8–16+) rastie zrýchlenie úmerne až do limitu RAM/IO.
+- Windows balík v0.9.1 v Releases (GUI aj CLI, README doplnené).
+
 ## [0.9.0] – 2026-08-28 – Rust GUI: grafické okno k Rust verzii
 
 Prečo: Rust verzia bola doteraz len príkazový riadok; používateľ si

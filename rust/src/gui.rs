@@ -35,6 +35,7 @@ struct Row {
 }
 
 struct App {
+    max_vlakien: usize,
     path_text: String,
     files: Vec<PathBuf>,
     rows: Vec<Row>,
@@ -86,7 +87,11 @@ impl App {
             model_ok = true;
         }
 
+        let avail = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Self {
+            max_vlakien: avail,
             path_text: String::new(),
             files: Vec::new(),
             rows: Vec::new(),
@@ -95,7 +100,7 @@ impl App {
             min_istota: 50.0,
             skip_by_name: true,
             istota_do_popisu: false,
-            vlakien: 4,
+            vlakien: avail,
             model_dir,
             model_ok,
             log: String::from("Analyzátor (Rust test) spustený.\n"),
@@ -370,7 +375,15 @@ impl eframe::App for App {
                         .step_by(1.0)
                         .text("prah istoty %"),
                 );
-                ui.add(egui::Slider::new(&mut self.vlakien, 1..=16).text("vlákien dekódu"));
+                ui.add(
+                    egui::Slider::new(&mut self.vlakien, 1..=self.max_vlakien.max(4))
+                        .text(format!("vlákien dekódu (auto: {})", self.max_vlakien)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Detekovaných logických jadier: {}", self.max_vlakien))
+                        .small()
+                        .weak(),
+                );
                 ui.checkbox(
                     &mut self.skip_by_name,
                     "AI preskočiť pri jednoznačnom názve",
