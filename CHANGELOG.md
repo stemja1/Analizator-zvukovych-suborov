@@ -5,6 +5,22 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.7.2] – 2026-08-28 – DIAGNOZA.bat: automatická diagnostika pre používateľa
+
+Prečo: používateľovi sa po stiahnutí Rust verzie pokazil aj hlavný
+(Python) analyzátor; na diaľku potrebujem presný stav jeho inštalácie
+(screenshoty nevidím, text chyby je potrebný). 
+
+### Pridané
+- **`DIAGNOZA.bat`** – dvojklikom spustiteľná diagnostika (ASCII+CRLF):
+  vypíše zoznam súborov programu, AI modelu, Python prostredia .venv,
+  otestuje importy knižníc (onnxruntime vrátane zoznamu providerov,
+  numpy, soundfile, transformers, PyQt6), bool DLL súborov v .venv
+  (či ich antivírus nezmazal), naučené dáta, rust priečinok a najmä
+  **históru blokácií Windows Defender** (Get-MpThreatDetection).
+  Výsledok zapíše do `DIAGNOZA-VYSLEDOK.txt` a otvorí ho v poznámkovom
+  bloku – používateľ ho skopíruje a pošle späť.
+
 ## [0.7.1] – 2026-08-28 – Windows balík Rust verzie na stiahnutie + návod v repo
 
 Prečo: používateľ nemá kompilátor a chce Rust verziu testovať dvojklikom
