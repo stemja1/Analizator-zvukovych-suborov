@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Návod — Analyzátor zvukových súborov (LAION-CLAP + DirectML)</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#171e2e; --panel2:#1d2638; --line:#2a3550;
+    --txt:#e8edf7; --muted:#9aa7c0; --accent:#4da3ff; --accent2:#7ee0a3;
+    --green:#2e9e44; --red:#d03a3a; --orange:#e08a00; --gray:#8a8a8a;
+    --code:#0b101a; --chip:#22304d;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth;}
+  body{
+    font-family:"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    background:var(--bg); color:var(--txt); line-height:1.65; padding:0 0 80px;
+  }
+  .hero{
+    background:linear-gradient(135deg,#16203a 0%,#0f1420 60%),radial-gradient(circle at 80% 20%, #1e3a5f 0%, transparent 50%);
+    border-bottom:1px solid var(--line); padding:48px 24px 40px; text-align:center;
+  }
+  .hero h1{font-size:1.9em; letter-spacing:.3px;}
+  .hero p{color:var(--muted); max-width:760px; margin:12px auto 0;}
+  .badges{margin-top:18px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;}
+  .badge{
+    background:var(--chip); border:1px solid var(--line); color:var(--accent);
+    font-size:.78em; padding:4px 12px; border-radius:99px; font-weight:600;
+  }
+  main{max-width:900px; margin:0 auto; padding:0 20px;}
+  section{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:28px 30px; margin-top:28px;
+  }
+  h2{
+    font-size:1.25em; margin-bottom:16px; display:flex; align-items:center; gap:12px;
+    color:#fff;
+  }
+  .stepnum{
+    background:linear-gradient(135deg,var(--accent),#2f7cd6); color:#fff; min-width:34px; height:34px;
+    border-radius:10px; display:inline-flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:.9em; flex:none;
+  }
+  h3{font-size:1.02em; margin:20px 0 8px; color:var(--accent2);}
+  p{margin:8px 0; color:var(--txt);}
+  .muted{color:var(--muted); font-size:.92em;}
+  ul,ol{margin:8px 0 8px 22px;}
+  li{margin:5px 0;}
+  code{
+    font-family:"Cascadia Code",Consolas,"Courier New",monospace; font-size:.88em;
+    background:var(--code); border:1px solid var(--line); border-radius:6px; padding:2px 7px; color:#9fd0ff;
+  }
+  pre{
+    background:var(--code); border:1px solid var(--line); border-radius:10px;
+    padding:14px 18px; overflow-x:auto; margin:12px 0; position:relative;
+  }
+  pre code{background:none; border:none; padding:0; color:#cfe6ff; font-size:.9em; line-height:1.7;}
+  .comment{color:#6d7f9e;}
+  table{width:100%; border-collapse:collapse; margin:14px 0; font-size:.93em;}
+  th{
+    text-align:left; background:var(--panel2); color:var(--muted); font-weight:600;
+    padding:10px 12px; border:1px solid var(--line); font-size:.9em; text-transform:uppercase; letter-spacing:.4px;
+  }
+  td{padding:10px 12px; border:1px solid var(--line); vertical-align:top;}
+  tr:nth-child(even) td{background:rgba(255,255,255,.02);}
+  .tagpill{
+    display:inline-block; background:var(--chip); border:1px solid var(--line);
+    border-radius:6px; padding:1px 8px; font-family:Consolas,monospace; font-size:.85em; color:#ffd479;
+  }
+  .callout{
+    border-radius:10px; padding:14px 18px; margin:14px 0; display:flex; gap:12px; align-items:flex-start;
+    border:1px solid var(--line); background:var(--panel2); font-size:.95em;
+  }
+  .callout svg{flex:none; margin-top:2px;}
+  .callout.info{border-left:4px solid var(--accent);}
+  .callout.warn{border-left:4px solid var(--orange);}
+  .callout.ok{border-left:4px solid var(--green);}
+  .status{font-weight:700; padding:2px 10px; border-radius:6px; font-size:.88em; display:inline-block;}
+  .st-wait{background:#3a3a3a; color:#ccc;}
+  .st-run{background:#4a3208; color:#ffb84d;}
+  .st-done{background:#123c1c; color:#7ee0a3;}
+  .st-err{background:#4a1414; color:#ff8f8f;}
+  .st-skip{background:#333; color:#aaa;}
+  .flow{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:16px 0;}
+  .flow .node{
+    background:var(--chip); border:1px solid var(--line); border-radius:10px; padding:8px 14px;
+    font-size:.88em; display:flex; align-items:center; gap:8px;
+  }
+  .flow .arrow{color:var(--muted); font-size:1.1em;}
+  .kbd{
+    background:#2a3550; border:1px solid #3d4d75; border-bottom-width:3px; border-radius:6px;
+    padding:1px 8px; font-size:.85em; font-family:Consolas,monospace; color:#fff;
+  }
+  .two{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  @media(max-width:700px){.two{grid-template-columns:1fr;}}
+  .card{
+    background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:14px 16px;
+  }
+  .card b{color:#fff;}
+  .toc{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin-top:20px;
+  }
+  .toc a{
+    color:var(--txt); text-decoration:none; background:var(--panel2); border:1px solid var(--line);
+    border-radius:10px; padding:12px 16px; display:flex; gap:10px; align-items:center; transition:border-color .15s;
+  }
+  .toc a:hover{border-color:var(--accent);}
+  .toc .n{color:var(--accent); font-weight:700; font-size:.85em;}
+  footer{text-align:center; color:var(--muted); font-size:.85em; margin-top:40px;}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div style="margin-bottom:10px;">
+    <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#4da3ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 12v-1a9 9 0 0 1 18 0v1"/><path d="M21 16a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5z"/><path d="M3 16a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5z"/><path d="M21 16v2a4 4 0 0 1-4 4h-5"/>
+    </svg>
+  </div>
+  <h1>🎧 Analyzátor zvukových súborov</h1>
+  <p>Automatické rozpoznanie obsahu zvuku a zápis AI popisu do metadát súborov — pomocou modelu <b>LAION-CLAP</b> s akceleráciou <b>AMD DirectML</b> (Radeon RX 7700 XT).</p>
+  <div class="badges">
+    <span class="badge">Python + PyQt6</span>
+    <span class="badge">ONNX Runtime / DirectML</span>
+    <span class="badge">WAV · MP3 · OGG · FLAC</span>
+    <span class="badge">offline po prvom spustení</span>
+  </div>
+
+  <nav class="toc">
+    <a href="#priprava"><span class="n">01</span> Príprava</a>
+    <a href="#instalacia"><span class="n">02</span> Inštalácia</a>
+    <a href="#prvy-start"><span class="n">03</span> Prvé spustenie</a>
+    <a href="#gui"><span class="n">04</span> Práca v aplikácii</a>
+    <a href="#vysledky"><span class="n">05</span> Kde sú výsledky</a>
+    <a href="#cli"><span class="n">06</span> Test bez GUI</a>
+    <a href="#problemy"><span class="n">07</span> Riešenie problémov</a>
+    <a href="#tipy"><span class="n">08</span> Tipy &amp; triky</a>
+    <a href="#rust"><span class="n">09</span> Rust verzia (rýchlejšia)</a>
+  </nav>
+</div>
+
+<main>
+
+<!-- ============ 01 PRIPRAVA ============ -->
+<section id="priprava">
+  <h2><span class="stepnum">01</span> Čo budete potrebovať</h2>
+  <table>
+    <tr><th>Požiadavka</th><th>Detail</th></tr>
+    <tr><td><b>Windows 10/11</b></td><td>64-bit, s aktuálnym ovládačom <b>AMD Adrenalin</b> (pre DirectML akceleráciu)</td></tr>
+    <tr><td><b>Python 3.10 – 3.13</b></td><td><a href="https://www.python.org/downloads/" style="color:var(--accent)">python.org/downloads</a> — pri inštalácii <b>zaškrtnite „Add Python to PATH“</b></td></tr>
+    <tr><td><b>Internet</b></td><td>len na prvé spustenie (download AI modelu ~600 MB); potom aplikácia beží offline</td></tr>
+    <tr><td><b>Miesto na disku</b></td><td>cca 2 GB (model + ONNX grafy)</td></tr>
+    <tr><td><b>Git</b> <span class="muted">(voliteľné)</span></td><td>ak nemáte, stiahnite repo ako ZIP (viď krok 2)</td></tr>
+  </table>
+</section>
+
+<!-- ============ 02 INSTALACIA ============ -->
+<section id="instalacia">
+  <h2><span class="stepnum">02</span> Inštalácia</h2>
+
+  <h3>2.1 — Stiahnite aplikáciu</h3>
+  <p>Otvorte príkazový riadok (<span class="kbd">Win</span> + <span class="kbd">R</span> → napíšte <code>cmd</code> → <span class="kbd">Enter</span>) a zadajte:</p>
+  <pre><code>git clone https://github.com/stemja1/Analizator-zvukovych-suborov.git
+cd Analizator-zvukovych-suborov</code></pre>
+  <p class="muted">Bez gitu: na GitHub stránke repozitára kliknite zelené tlačidlo <b>Code → Download ZIP</b>, rozbaľte a v cmd prejdite do priečinka (<code>cd Downloads\Analizator-zvukovych-suborov-main</code>).</p>
+
+  <h3>2.2 — Vytvorte virtuálne prostredie</h3>
+  <pre><code>python -m venv .venv
+.venv\Scripts\activate</code></pre>
+  <div class="callout info">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4da3ff" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+    <div>Po aktivácii uvidíte na začiatku riadku <code>(.venv)</code>. Virtuálne prostredie udržuje závislosti oddelene od systémového Pythonu. Pri každom ďalšom otvorení cmd stačí zadať <code>.venv\Scripts\activate</code> v priečinku projektu.</div>
+  </div>
+
+  <h3>2.3 — Nainštalujte závislosti</h3>
+  <pre><code>pip install -r requirements.txt</code></pre>
+  <p class="muted">Trvá pár minút (stiahne sa PyQt6, PyTorch CPU, ONNX Runtime DirectML, librosa, mutagen…).</p>
+</section>
+
+<!-- ============ 03 PRVY START ============ -->
+<section id="prvy-start">
+  <h2><span class="stepnum">03</span> Prvé spustenie</h2>
+  <pre><code>python main_gui.py</code></pre>
+
+  <div class="callout warn">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e08a00" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+    <div><b>Prvý štart trvá 2–5 minút</b> — aplikácia sťahuje AI model z HuggingFace (~600 MB) a jednorazovo vytvára ONNX grafy. Priebeh vidíte v spodnom logu. Pri každom ďalšom spustení je štart rýchly (~10 s).</div>
+  </div>
+
+  <h3>Ako overiť, že beží na grafickej karte</h3>
+  <p>Po štarte analýzy skontrolujte štítok nad tlačidlami alebo riadok v logu:</p>
+  <table>
+    <tr><th>Správa</th><th>Význam</th></tr>
+    <tr><td><code>audio: ONNX/DirectML, text: ONNX</code></td><td>✅ inference beží na AMD GPU — plná akcelerácia</td></tr>
+    <tr><td><code>audio: ONNX/CPU</code></td><td>⚠ fallback na procesor — funguje, ale pomalšie (pozri sekciu 07)</td></tr>
+  </table>
+</section>
+
+<!-- ============ 04 GUI ============ -->
+<section id="gui">
+  <h2><span class="stepnum">04</span> Práca v aplikácii — 4 kliky</h2>
+
+  <div class="flow">
+    <div class="node">📁 Pridať súbory</div><div class="arrow">→</div>
+    <div class="node">📝 Napíš popisy</div><div class="arrow">→</div>
+    <div class="node">▶ Spustiť analýzu</div><div class="arrow">→</div>
+    <div class="node">✅ Hotovo — tagy zapísané</div>
+  </div>
+
+  <h3>1. Pridajte zvuky</h3>
+  <ul>
+    <li><b>＋ Pridať súbory…</b> — vyberiete jednotlivé súbory (WAV, MP3, OGG, FLAC)</li>
+    <li><b>📂 Pridať priečinok…</b> — natiahne všetky podporované zvuky z celej zložky <b>vrátane podpriečinkov</b> (rekurzívne, prirodzené triedenie <code>file2 &lt; file10</code>)</li>
+    <li>alebo jednoducho <b>presuňte súbory myšou</b> do okna aplikácie (drag &amp; drop)</li>
+  </ul>
+
+  <h3>2. Napíšte kandidátske popisy (pravý panel)</h3>
+  <ul>
+    <li><b>Predvoľba</b> (rozbaľovacie zoznam): <b>🎬 SFX pre film/reklamu (~170 popisov)</b>, 🎚 pôvodný zoznam (~69) alebo 🧪 rýchly štart — pole potom ľubovoľne doplňte/upravte</li>
+    <li><b>jeden popis na riadok</b>, písaný <b>v angličtine</b> (model bol trénovaný na anglických textoch)</li>
+    <li>riadky začínajúce <code>#</code> sú len <b>sekcie</b> (komentáre) — do analýzy sa nezapočítavajú</li>
+    <li>popisy majú byť <b>konkrétne a navzájom odlišné</b> — aplikácia vyberá len z toho, čo zadáte</li>
+  </ul>
+  <pre><code>heavy rain falling on roof
+dog barking outdoors
+car engine revving
+birds singing in the forest
+people talking in a room
+wind blowing through trees</code></pre>
+  <p class="muted">Voliteľne zaškrtnite <b>„Zapísať aj istotu do popisu“</b> — do tagu sa pridá napr. <code>dog barking outdoors (istota 87 %)</code>.</p>
+
+  <h3>3. Nastavte presnosť a spustite</h3>
+  <p><b>Úseky na súbor</b> (1–8, odporúčame <b>4</b>): koľko 10-sekundových okien sa v každom súbore analyzuje a <b>spriemeruje</b> — dlhé súbory s premenlivým obsahom sa zachytia celé, nielen stred.</p>
+  <p>Kliknite <b>▶ Spustiť AI analýzu</b>. Spracovanie beží na pozadí — okno nikdy nezamrzne, beh je možné kedykoľvek <b>■ Zrušiť</b>. Progress bar ukazuje <b>percentá aj odhad zostávajúceho času (ETA)</b>.</p>
+
+  <h3>4. Sledujte stavy v tabuľke</h3>
+  <table>
+    <tr><th>Stav</th><th>Význam</th></tr>
+    <tr><td><span class="status st-wait">Čaká</span></td><td>čaká v poriadí na spracovanie</td></tr>
+    <tr><td><span class="status st-run">Spracováva sa…</span></td><td>práve beží AI analýza</td></tr>
+    <tr><td><span class="status st-done">Hotovo</span></td><td>popis vybraný <b>a zapísaný do metadát</b> súboru</td></tr>
+    <tr><td><span class="status st-err">Chyba</span></td><td>súbor sa nepodarilo načítať/zapísať — dôvod je v stĺpci Detail a v logu</td></tr>
+    <tr><td><span class="status st-skip">Preskočené</span></td><td>beh bol zrušený skôr, než sa na súbor dostalo</td></tr>
+  </table>
+  <p class="muted">V stĺpci <b>Detail</b> uvidíte istotu, <b>náskok pred 2. kandidátom</b> (malý náskok = nejednoznačný výsledok → spresnite popisy), počet analyzovaných okien a kam sa zapisovalo (napr. <code>istota 96 % | náskok +12 % | 4× okno | ID3 COMM | 0.2 s</code>). Top 3 kandidáti sú v logu.</p>
+</section>
+
+<!-- ============ 05 VYSLEDKY ============ -->
+<section id="vysledky">
+  <h2><span class="stepnum">05</span> Kde nájdete výsledky</h2>
+  <p>Popis sa zapíše <b>priamo do metadát zvukového súboru</b> — nikde sa nevytvárajú žiadne vedľajšie súbory:</p>
+  <table>
+    <tr><th>Formát</th><th>Tag</th><th>Kde to vidieť vo Windows</th></tr>
+    <tr><td><b>MP3</b></td><td><span class="tagpill">ID3 COMM</span> (komentár)</td><td rowspan="5" style="vertical-align:middle">Pravý klik na súbor → <b>Vlastnosti → Podrobnosti</b> → stĺpec <b>Komentár</b>,<br>alebo v programe Mp3tag / foobar2000 / Audacity</td></tr>
+    <tr><td><b>WAV</b></td><td><span class="tagpill">RIFF INFO ICMT</span></td></tr>
+    <tr><td><b>OGG</b></td><td><span class="tagpill">Vorbis DESCRIPTION</span></td></tr>
+    <tr><td><b>FLAC</b></td><td><span class="tagpill">Vorbis DESCRIPTION</span></td></tr>
+    <tr><td class="muted">OGG/FLAC</td><td class="muted" colspan="1">v Prohlížeči súborov komentár nemusí byť vidieť — použite Mp3tag</td></tr>
+  </table>
+  <div class="callout ok">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7ee0a3" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4 12 14.01l-3-3"/></svg>
+    <div>Opakovaným spustením analýzy sa starý popis <b>čisto nahradí</b> — nevytvárajú sa duplicity.</div>
+  </div>
+</section>
+
+<!-- ============ 06 CLI ============ -->
+<section id="cli">
+  <h2><span class="stepnum">06</span> Rýchly test bez GUI</h2>
+  <p>Najrýchlejší spôsob, ako vyskúšať AI bez klikania — vypíše poradie všetkých kandidátov so skóre a rovno zapíše najlepší do metadát:</p>
+  <pre><code>python core_analyzer.py zvuk.mp3 "heavy rain on roof" "dog barking" "car engine"</code></pre>
+  <pre><code class="comment"># výstup:</code>
+Súbor:  zvuk.mp3
+Backend: audio: ONNX/DirectML, text: ONNX | onnxruntime 1.20.x
+Poradie kandidátov:
+   96.9 %  heavy rain on roof  ← NAJLEPŠIE
+    3.1 %  dog barking
+    0.0 %  car engine
+
+Zapísané do metadát (ID3 COMM): ‘heavy rain on roof’</code></pre>
+</section>
+
+<!-- ============ 07 PROBLEMY ============ -->
+<section id="problemy">
+  <h2><span class="stepnum">07</span> Riešenie problémov</h2>
+  <table>
+    <tr><th>Problém</th><th>Riešenie</th></tr>
+    <tr>
+      <td>V logu <code>⚠ DirectML zlyhalo → CPU</code></td>
+      <td>DirectML balík nie je aktívny. Zadajte:<br><code>pip uninstall -y onnxruntime</code><br><code>pip install onnxruntime-directml</code><br><span class="muted">Bežný <code>onnxruntime</code> a <code>onnxruntime-directml</code> sa vzájomne vylučujú. Aplikácia pritom aj tak funguje — len na CPU.</span></td>
+    </tr>
+    <tr>
+      <td>Prvý štart „visí“ / trhá sa</td>
+      <td>Prebieha download modelu (~600 MB) + jednorazový ONNX export. Priebeh sledujte v logu. Ďalšie štarty sú rýchle.</td>
+    </tr>
+    <tr>
+      <td><code>⚠ textové embeddingy pôjdu cez torch (CPU)</code></td>
+      <td>Nič fatalné — export textového ONNX grafu zlyhal (málo RAM), aplikácia použila záložnú cestu s identickými výsledkami.</td>
+    </tr>
+    <tr>
+      <td>MP3/OGG sa nenačítajú</td>
+      <td>Skúste do PATH pridať <b>ffmpeg</b>, alebo prekonvertujte na WAV/FLAC.</td>
+    </tr>
+    <tr>
+      <td>Nízka istota / zlé výsledky</td>
+      <td>① pridajte viac rozličných popisov ② formulujte konkrétnejšie ③ píšte anglicky ④ analyzuje sa <b>stredných 10 s</b> — pri dlhých mixoch skúste súbor rozdeliť.</td>
+    </tr>
+    <tr>
+      <td><code>python nie je rozpoznaný</code></td>
+      <td>Python nie je v PATH — preinštalujte so zaškrtnutým „Add Python to PATH“, alebo použite plnú cestu <code>py main_gui.py</code>.</td>
+    </tr>
+    <tr>
+      <td>Chcem analyzovať celý súbor, nielen 10 s</td>
+      <td>V súbore <code>core_analyzer.py</code> zmeňte konštantu <code>CLIP_SECONDS = 10</code> (a zmažte priečinok <code>models/</code>, aby sa ONNX export vygeneroval nanovo).</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ============ 08 TIPY ============ -->
+<section id="tipy">
+  <h2><span class="stepnum">08</span> Tipy &amp; triky</h2>
+  <div class="two">
+    <div class="card"><b>🎯 Kvalita popisov</b><p class="muted">„heavy rain falling on a metal roof“ funguje lepšie než „rain“. Čím charakteristickejší popis, tým jasnejšie rozlíšenie.</p></div>
+    <div class="card"><b>⚡ Batch = rýchlosť</b><p class="muted">Textové popisy sa vypočítajú raz a cache-ujú — aj 100 súborov s rovnakým zoznamom popisov prebehne rapídne.</p></div>
+    <div class="card"><b>🔁 Opakovateľnosť</b><p class="muted">Analýza je deterministická — ten istý súbor a popisy dajú vždy rovnaké skóre.</p></div>
+    <div class="card"><b>🧹 Reset modelu</b><p class="muted">Ak by niečo nehrubo, zmažte priečinok <code>models/</code> — pri ďalšom štarte sa export obnoví (bez nového downloadu).</p></div>
+  </div>
+
+  <h3>Ako to funguje pod kapotou</h3>
+  <div class="flow">
+    <div class="node">🎵 Zvuk (48 kHz, 10 s)</div><div class="arrow">→</div>
+    <div class="node">🧠 CLAP audio embedding (ONNX/DirectML)</div><div class="arrow">→</div>
+    <div class="node">📐 Cosine similarity</div><div class="arrow">→</div>
+    <div class="node">📊 Softmax skóre</div><div class="arrow">→</div>
+    <div class="node">🏷️ Zápis do tagov</div>
+  </div>
+  <p class="muted">Textové popisy sa tiež prevádzajú na embeddingy; aplikácia nájde najlepšiu zhodu medzi zvukom a kandidátmi. Klasifikuje výhradne do zadaného zoznamu — negeneruje ľubovoľný text.</p>
+</section>
+
+<!-- ============ 09 RUST VERZIA ============ -->
+<section id="rust">
+  <h2><span class="stepnum">09</span> Rust verzia — rýchlejšia alternatíva (testovacia)</h2>
+  <p>Vedľa Python verzie existuje <b>alternatívna testovacia verzia napísaná v Ruste</b>.
+  Dáva <b>rovnaké výsledky</b> ako Python verzia — zhoda bola overená číselne
+  (log-mel spektrogram na 0,0000 dB, pravdepodobnosti na 6&nbsp;pracovných desatín),
+  ale beží <b>cca 1,7–1,9× rýchlejšie</b>. Zatiaľ je to len príkazový riadok (bez okna),
+  GUI pribudne neskôr. <b>Python verzia zostáva hlavná a nemení sa.</b></p>
+
+  <div class="two">
+    <div class="card"><b>📦 Kde stiahnuť</b><p class="muted">Priečinok <code>Releases</code> na GitHub:
+      <code>github.com/stemja1/Analizator-zvukovych-suborov/releases</code> —
+      súbor <code>analyzator-rs-windows.zip</code>. Stiahnite, rozbaľte, hotovo —
+      nič sa neinštaluje.</p></div>
+    <div class="card"><b>🖱️ Ako spustiť</b><p class="muted">Rozbalený priečinok <code>analyzator-rs-windows</code>
+      nakopírujte do hlavného priečinka programu (k <code>SPUSTI.bat</code>) — program si vezme
+      už stiahnutý AI model aj naučené dáta. Potom <b>dvojklik na <code>TEST-RUST.bat</code></b>
+      a zadanie cesty k priečinku so zvukmi (alebo potiahnite priečinok myskou na bat).</p></div>
+  </div>
+
+  <p class="muted">Program podporuje aj GPU (DirectML) automaticky — ak je k dispozícii, použije ho,
+  inak počíta na procesore. Naučené spojenia a zvukové vzory sú spoločné s Python verziou:
+  čo sa naučí jedna verzia, druhá to vie použiť (a naopak). Výstup vyzerá rovnako:
+  ✔ názovúbor.mp3 → ‚popis‘ (istota NN %).</p>
+</section>
+
+<footer>
+  Analyzátor zvukových súborov · LAION-CLAP (laion/clap-htsat-unfused) · ONNX Runtime DirectML · licencia MIT<br>
+  Repo: github.com/stemja1/Analizator-zvukovych-suborov
+</footer>
+
+</main>
+</body>
+</html>

@@ -11,11 +11,21 @@ pub const TEXT_TOKENS: usize = 32;
 pub const TEXT_BATCH: usize = 32;
 
 fn new_session(path: &std::path::Path) -> Result<Session> {
-    let b = Session::builder()?.with_optimization_level(GraphOptimizationLevel::Level3)?;
+    // DirectML (GPU) s pádom späť na CPU – rovnako ako Python verzia
     #[cfg(feature = "ort-directml")]
     {
-        b = b.with_execution_providers([ort::execution_providers::DirectML::default().build()])?;
+        let b = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_execution_providers([
+                ort::execution_providers::DirectMLExecutionProvider::default().build(),
+            ])?;
+        match b.commit_from_file(path) {
+            Ok(s) => return Ok(s),
+            Err(e) => eprintln!("[CLAP] DirectML nedostupné ({e}) → pokračujem na CPU"),
+        }
     }
+    let b = Session::builder()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?;
     Ok(b.commit_from_file(path)?)
 }
 

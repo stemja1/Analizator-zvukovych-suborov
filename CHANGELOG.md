@@ -5,6 +5,44 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.7.1] – 2026-08-28 – Windows balík Rust verzie na stiahnutie + návod v repo
+
+Prečo: používateľ nemá kompilátor a chce Rust verziu testovať dvojklikom
+ako ostatné časti programu; návod doteraz nebol súčasťou repa.
+
+### Pridané
+- **Windows balík v GitHub Releases** (príloha `analyzator-rs-windows.zip`
+  pri tagu `v0.7.1`): `analyzator-rs.exe` (13,7 MB, zostavené pre
+  64-bit Windows), `onnxruntime.dll` + `onnxruntime_providers_shared.dll`
+  ( oficiálny NuGet balík Microsoft.ML.OnnxRuntime.DirectML 1.24.4 –
+  jediná súčasná oficiálna distribúcia DirectML buildu; samostatné
+  „directml-win-x64“ ZIPy Microsoft v releases už nezverejňuje),
+  `TEST-RUST.bat` (spúšťač – dvojklik alebo potiahnutie priečinka
+  myskou; ASCII + CRLF podľa konvencie), `popisy.txt` (rovnakých 69
+  predvolených popisov ako GUI), `README-RUST.txt` (krátky návod SK).
+  Exe závisí len od štandardných Windows knižníc (kontrola objdump) –
+  nič netreba inštalovať.
+- **`navod-analyzator.html` v repo** – kompletný návod (inštalácia,
+  práca v GUI, riešenie problémov) + nová sekcia 09 o Rust verzii
+  (kde stiahnuť, ako spustiť, spoločné naučené dáta).
+
+### Zmenené
+- `rust/Cargo.toml`: ONNX Runtime spôsob pripojenia je teraz výslovná
+  voľba – `default = ["ort-static"]` (vkompilované binárky, Linux/
+  vývoj) a `--no-default-features --features "ort-directml,
+  ort-load-dynamic"` pre Windows build (exe načíta onnxruntime.dll
+  za behu). Prečo: ort pre `x86_64-pc-windows-gnu` nemá predkompilované
+  binárky, a DirectML/GPU takto funguje s oficiálnou DLL od Microsoftu.
+- `rust/src/model.rs`: DirectML_executionProvider opravený názov
+  (build s `ort-directml` predtým nešiel skompilovať) + pokus o DirectML
+  s automatickým pádom na CPU, ak GPU/DirectML nie je k dispozícii
+  (rovnaké správanie ako Python verzia; overené testom s CPU-only
+  knižnicou).
+- Overenie exe logiky: rovnaký zdrojový kód bol otestovaný na Linuxe
+  s dynamickou knižnicou (načítanie DLL za behu, CPU fallback pri
+  chýbajúcom DirectML, celý beh vrátane zápisu metadát) – Windows exe
+  je z tohto kódu zostavené cross-kompilátorom mingw-w64.
+
 ## [0.7.0] – 2026-08-25 – Rust verzia: CLI alternatíva s preukázanou paritou
 
 Prečo: používateľ si prial vyskúšať **alternatívnu testovaciu verziu v Ruste**
