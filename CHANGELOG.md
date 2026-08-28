@@ -5,6 +5,24 @@ Formát podľa [Keep a Changelog](https://keepachangelog.com), verzie SEMVER.
 
 ---
 
+## [0.7.3] – 2026-08-28 – Oprava TEST-RUST.bat (model sa nenašiel)
+
+Prečo: bat hľadal AI model v adresári spúšťača, ale keď bol priečinok
+umiestnený v hlavnom priečinku programu (podľa návodu), model je
+o úroveň vyššie (`..\models`) – program teda skončil chybou a Rust
+verzia na používateľovom stroji neprešla. Nová release v0.7.3 nahrádza
+pôvodnú v0.7.1 (zmazaná, aby zostal jediný funkčný odkaz).
+
+### Opravené
+- **TEST-RUST.bat**: hľadá model v poradí (1) `..\models\clap_…
+  _onnx` – priečinok v hlavnom adresári programu (odporúčané;
+  zároveň sa tak použijú aj spoločné naučené dáta `naucene_*`),
+  (2) priečinok `model` pri programe, (3) aktuálny adresár.
+  Pridané: kontrola, že exe existuje (ak ho zmazal antivírus,
+  vypíše zrozumiteľné upozornenie) a `chcp 65001` pre správne
+  zobrazenie slovenskej diakritiky vo výpise.
+- Zdrojové podoby súborov balíka verzované v `rust/windows-bundle/`.
+
 ## [0.7.2] – 2026-08-28 – DIAGNOZA.bat: automatická diagnostika pre používateľa
 
 Prečo: používateľovi sa po stiahnutí Rust verzie pokazil aj hlavný
